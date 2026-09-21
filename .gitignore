@@ -1,0 +1,7 @@
+node_modules/
+lib/
+*.log
+.tmp/
+# Local pnpm content-addressable store, materialised inside the repo by this
+# machine's pnpm configuration (the sibling plugin dsh-drawio has the same one).
+.pnpm-store/

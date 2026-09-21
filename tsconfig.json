@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    // DOM is here for the client half (`src/client/**`) only. The host half must
+    // stay Node-only, and `tsconfig` cannot scope a `lib`, so the guard is a test:
+    // `test/integration.test.ts` ("keeps DOM globals out of the host half") fails if
+    // a host file mentions a DOM global, and asserts the client files it scans exist.
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    // The client half (`src/client/**`) is React; `react-jsx` keeps the runtime
+    // import automatic. React stays an *external* of the client bundle, so this
+    // setting affects type-checking and the bundle's jsx transform only — it adds
+    // no runtime dependency.
+    "jsx": "react-jsx",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    // `allowJs` exists only so the type-only check can follow the import of
+    // `tools/fake-coordinator.mjs` from its test. That tool is deliberately
+    // plain JavaScript (no build step, always runnable from a dirty tree), and
+    // `tsconfig.build.json` still emits from `src/**` alone, so nothing in
+    // `tools/` reaches `lib/`. `checkJs` stays off: the fixture is verified by
+    // running it, not by type-checking it.
+    "allowJs": true,
+    "checkJs": false,
+    "types": ["node"],
+    "baseUrl": "."
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "tools/**/*.mjs", "tsdown.config.ts"],
+  "exclude": ["lib", "node_modules"]
+}

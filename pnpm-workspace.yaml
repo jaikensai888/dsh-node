@@ -1,0 +1,15 @@
+# pnpm 11 blocks dependency build scripts unless allowed here.
+#
+# esbuild is deliberately DENIED, not allowed: its postinstall spawns a child
+# process with piped stdio, which the DSH file sandbox rejects with
+# `spawn EPERM`, aborting the whole install before pnpm links node_modules/.bin.
+# The script is only a fallback for a missing platform package, and
+# @esbuild/win32-x64 installs normally, so the JS API used by vite/vitest works
+# without it. (Same rationale as the sibling plugin dsh-drawio.)
+allowBuilds:
+  esbuild: false
+
+# Disabled on purpose: the guard rejects a lockfile entry whose upstream publish
+# time is inside the age window, making CI depend on wall-clock time instead of
+# on the committed, reviewed lockfile.
+minimumReleaseAge: 0
