@@ -62,10 +62,16 @@ export const NODE_ENTRY_LABEL = '节点'
  *
  * Kept here with the rest of the copy: the panel and the tooltip must never drift
  * apart on what the fix is, and text is easier to test than a tree.
+ *
+ * The form below is named **first** and the file second, because that is the actual
+ * order of usefulness now that the panel can save: telling someone to edit YAML and
+ * restart DSH while a working form sits directly underneath is how a UI teaches
+ * people to ignore it.
  */
 export const UNCONFIGURED_HINT =
-  '未配置：在 profile 的 cordis.patch.yml 里给 dsh-node 填上 coordinatorUrl 与 auth.token'
-  + '（或设 DSH_NODE_TOKEN 环境变量），然后重启 DSH。文件里那段注释模板取消注释即可。'
+  '未配置：在下面填「协调器地址」和「令牌」，保存后立即连接，不用重启 DSH。'
+  + '也可以改用 profile 的 cordis.patch.yml（coordinatorUrl + auth.token）'
+  + '或 DSH_NODE_TOKEN 环境变量 —— 面板里保存的值优先级最高。'
 
 /**
  * What to tell an operator when the panel itself could not read the state.

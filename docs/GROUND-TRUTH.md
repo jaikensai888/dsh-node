@@ -234,6 +234,32 @@ coordinator/node-connected {"connectionId":"node-b7ae1e…:mu9imohm:qjydkiv1","s
 清理：验证后删掉 `config.json`、停掉沙箱 DSH 与协调器、把 `web` profile 的依赖与 junction
 复原（`profiles/web/package.json` 已回到只有 `dsh-better-sidebar`）。
 
+### 0.7.3 ⚠️ 配置文件让测试**依赖了机器状态** `[实测·自身失误]`
+
+**症状**：面板配置落地、并且用户真的用面板配好节点之后，集成测试在**这台机器上**从
+461 全绿变成 **27 失败**，一条用例从 0.3 秒变 130 秒。失败全是同一类：
+`expected 'connecting' to be 'stopped'`、`expected 'ready' to be 'unconfigured'`。
+
+**根因**：`apply()` 每次启动都会读 `<DSH_HOME>/storages/dsh-node/config.json` 并**合并覆盖**
+bootstrap，而集成测试用的正是这台机器的真实 `DSH_HOME`。这一轮之前它是绿的，
+**只是因为那时磁盘上还没有那个文件**；文件一出现，测试里显式写的「无效配置 / 未配置」
+就被文件里的**有效配置**覆盖了 —— 测试开始去连一台真实存在的协调器，直到超时。
+
+**结论（两层都要记住）**：
+
+1. **产品行为是对的**：`文件 > profile` 是这一版明确要的优先级，否则面板上的"保存"
+   就没有意义。**不要为了让测试变绿去改优先级。**
+2. **测试必须自己隔离存储层**：`test/integration.test.ts` 的 `beforeEach` 现在把
+   `process.env.DSH_HOME` 指向 `mkdtemp` 出来的临时目录，`afterEach` 还原。
+   同时新增两条用例把这条链路钉死 —— 它们才是"面板保存真的生效"的自动化证据：
+   - 文件里只有 `coordinatorUrl` + `token`、bootstrap 什么都不给 → 必须完成真实握手；
+   - 文件与 bootstrap 给**不同**的协调器地址 → 必须用文件里那个（bootstrap 里故意写
+     `ws://127.0.0.1:1/node`，连不上，所以"连上了"只可能是读了文件）。
+
+> 教训与 §0.3.7（守卫必须递归扫描）同类：**一个在"干净机器"上通过的测试，可能只是
+> 因为它没读到真实状态**。凡是会读全局位置（home、env、cwd）的代码路径，测试都要先
+> 把那个位置换掉。修完 463 tests / 13 files 全绿，且在**配置文件在位**的情况下同样全绿。
+
 ---
 
 ## 0.5 跨实现联调发现的两处节点侧问题（同一批测试抓到的）

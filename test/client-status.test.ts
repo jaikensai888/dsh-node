@@ -145,17 +145,23 @@ describe('state → visual', () => {
     }
   })
 
-  it('tells an unconfigured operator exactly what to edit', () => {
+  it('tells an unconfigured operator exactly what to do, form first and file second', () => {
     // The copy lives with the mapping so the panel and the tooltip cannot drift
     // apart; this is also the text the user asked for when they clicked the row.
+    //
+    // Order matters and is asserted: the form sits directly under this sentence, so
+    // naming a YAML file *before* it (which is what this text used to do) taught
+    // people to ignore the thing that would have fixed their node in one click.
+    expect(UNCONFIGURED_HINT.indexOf('协调器地址')).toBeLessThan(UNCONFIGURED_HINT.indexOf('cordis.patch.yml'))
+    // And the file / environment route stays documented as the alternative.
     expect(UNCONFIGURED_HINT).toContain('cordis.patch.yml')
     expect(UNCONFIGURED_HINT).toContain('coordinatorUrl')
     expect(UNCONFIGURED_HINT).toContain('auth.token')
     expect(UNCONFIGURED_HINT).toContain('DSH_NODE_TOKEN')
-    expect(UNCONFIGURED_HINT).toContain('重启')
-    // It must not promise a UI form that does not exist: secrets are configured in
-    // the profile file, never typed into this panel.
-    expect(UNCONFIGURED_HINT).not.toContain('输入框')
+    // A save applies immediately now, so the sentence must not send anyone to a
+    // restart they do not need.
+    expect(UNCONFIGURED_HINT).toContain('不用重启 DSH')
+    expect(UNCONFIGURED_HINT).toContain('优先级最高')
   })
 
   it('separates "the panel could not read" from "the node is not configured"', () => {

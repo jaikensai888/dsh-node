@@ -24,6 +24,7 @@ import { TypertRegistry } from '@deepseek-ai/dsh-typert-registry'
 import { WebSocketServer, type WebSocket } from 'ws'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as nodePlugin from '../src/index.js'
+import { resolveConfigFile, writeConfigFile } from '../src/index.js'
 import {
   NODE_MODES,
   PROTOCOL_VERSION,
@@ -432,6 +433,7 @@ function nodeConfig(
 interface NodeStatusView {
   state: string
   nodeId: string
+  coordinatorOrigin?: string
   inFlightRequests: number
   activeStreams: number
   connectionId?: string
@@ -454,6 +456,7 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
   let owner: DemoOwner
   let identityFile: string
   let identityDir: string
+  let previousDshHome: string | undefined
   let nodeFiber: Mounted | undefined
   const mounted: Mounted[] = []
 
@@ -470,6 +473,16 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
     await mkdir(join(process.cwd(), '.tmp'), { recursive: true })
     identityDir = await mkdtemp(join(process.cwd(), '.tmp', 'integration-'))
     identityFile = join(identityDir, 'identity.json')
+    // **Isolate the storage layer.** The plugin reads the panel's
+    // `<DSH_HOME>/storages/dsh-node/config.json` on every boot and merges it *over*
+    // the bootstrap, so a machine where someone has configured a node with the panel
+    // would silently rewrite every mount below. That is not hypothetical: the suite
+    // went green on a machine with no config file and then failed 27 tests once one
+    // existed. Pointing `DSH_HOME` at a fresh directory makes each run independent of
+    // whatever this machine happens to have, and the two tests at the end of this
+    // describe block pin the file layer itself.
+    previousDshHome = process.env['DSH_HOME']
+    process.env['DSH_HOME'] = identityDir
 
     root = new Context()
     // The order a real profile composes them in: the registry, then the Gateway
@@ -487,6 +500,8 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
     nodeFiber = undefined
     await coordinator.close()
     await rm(identityDir, { recursive: true, force: true })
+    if (previousDshHome === undefined) delete process.env['DSH_HOME']
+    else process.env['DSH_HOME'] = previousDshHome
   })
 
   /** The live status of the mounted node, or `undefined` before it exists. */
@@ -1004,6 +1019,42 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
       expect(coordinator.sessions).toHaveLength(0)
     } finally {
       await bare.fiber.dispose()
+    }
+  }, 20_000)
+
+  it('connects on the document the panel writes, with no configuration in the bootstrap', async () => {
+    // The panel's whole promise: type two values into the sidebar, and the node is
+    // connected. This is that promise expressed as a boot — the file exists, the
+    // bootstrap carries nothing but an identity file, and a real handshake must
+    // still complete.
+    const file = resolveConfigFile(process.env)
+    await writeConfigFile(file, { coordinatorUrl: coordinator.url, token: TOKEN, nodeName: 'from-the-panel' })
+    try {
+      nodeFiber = await mount(NODE_PLUGIN, { identityFile })
+      const session = await coordinator.acceptHandshake()
+      await coordinator.waitForReady(session)
+      const hello = session.frame<HelloFrame>('hello')
+      expect(hello?.auth.token).toBe(TOKEN)
+      expect(hello?.nodeName).toBe('from-the-panel')
+    } finally {
+      await rm(file, { force: true })
+    }
+  }, 20_000)
+
+  it('lets the stored document win over the profile it was started with', async () => {
+    // Precedence, as the panel's "save" depends on it: a save that a profile value
+    // could override would be a save that appears to work and changes nothing. The
+    // bogus URL below is the profile's; the node must ignore it and use the file's.
+    const file = resolveConfigFile(process.env)
+    await writeConfigFile(file, { coordinatorUrl: coordinator.url, token: TOKEN })
+    try {
+      nodeFiber = await mount(NODE_PLUGIN, nodeConfig('ws://127.0.0.1:1/node', identityFile))
+      const session = await coordinator.acceptHandshake()
+      await coordinator.waitForReady(session)
+      expect(nodeStatus()?.state).toBe('ready')
+      expect(nodeStatus()?.coordinatorOrigin).toBe(new URL(coordinator.url).origin)
+    } finally {
+      await rm(file, { force: true })
     }
   }, 20_000)
 })
