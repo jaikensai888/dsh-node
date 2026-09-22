@@ -31,6 +31,7 @@ import {
   readConfigFile,
   writeConfigFile,
   type ConfigFileRead,
+  type ConnectionIntent,
   type StoredNodeConfig,
 } from './config-file.js'
 import { HttpFailure, type NodeConfigSurface, type NodeConfigView } from './http-api.js'
@@ -117,6 +118,9 @@ export function foldSubmission(stored: StoredNodeConfig | undefined, input: Reco
   seed('token')
   seed('nodeName')
   seed('role')
+  if (stored?.connectionIntent === 'paused' || stored?.connectionIntent === 'active') {
+    next['connectionIntent'] = stored.connectionIntent
+  }
 
   const apply = (field: string, emptyMeansClear: boolean): void => {
     const intent = readSubmission(input, field, emptyMeansClear)
@@ -211,6 +215,7 @@ export class NodeConfigService implements NodeConfigSurface {
       tokenSet: effective.token !== undefined,
       ...(effective.nodeName === undefined ? {} : { nodeName: effective.nodeName }),
       ...(effective.role === undefined ? {} : { role: effective.role }),
+      connectionIntent: this.stored?.connectionIntent ?? 'active',
       nodeId: this.options.nodeId(),
       configFile: this.options.file,
       ...(this.fileError === undefined ? {} : { configFileError: this.fileError }),
@@ -233,6 +238,47 @@ export class NodeConfigService implements NodeConfigSurface {
     const run = this.queue.then(() => this.applySubmission(input))
     // Keep the chain alive after a rejection, or one bad save would wedge every
     // later one behind a rejected promise.
+    this.queue = run.then(() => undefined, () => undefined)
+    return run
+  }
+
+  /**
+   * Persist a manual connection decision without rebuilding the node.
+   *
+   * The connection button changes transport intent, not the resolved URL/token;
+   * routing that through `write()` would unnecessarily tear down a healthy node.
+   */
+  async setConnectionIntent(intent: ConnectionIntent): Promise<NodeConfigView> {
+    if (intent !== 'active' && intent !== 'paused') {
+      throw new HttpFailure(400, {
+        code: 'invalid-arguments',
+        message: 'connectionIntent must be "active" or "paused"',
+        details: { field: 'connectionIntent' },
+      })
+    }
+    const run = this.queue.then(async () => {
+      const saved: StoredNodeConfig = {
+        ...(this.stored ?? {}),
+        connectionIntent: intent,
+        updatedAt: new Date(this.options.now?.() ?? Date.now()).toISOString(),
+      }
+      try {
+        await writeConfigFile(this.options.file, saved)
+      } catch (error) {
+        throw new HttpFailure(500, {
+          code: 'node/config-write-failed',
+          message: `could not write ${this.options.file}: ${(error as Error).message}`,
+          details: { file: this.options.file },
+        })
+      }
+      this.stored = saved
+      this.fileError = undefined
+      this.options.warn?.('dsh-node/connection-intent-changed', {
+        file: this.options.file,
+        connectionIntent: intent,
+      })
+      return this.read()
+    })
     this.queue = run.then(() => undefined, () => undefined)
     return run
   }

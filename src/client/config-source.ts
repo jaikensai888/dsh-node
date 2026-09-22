@@ -24,6 +24,8 @@ export interface NodeConfigSnapshot {
   readonly tokenSet: boolean
   readonly nodeName?: string
   readonly role?: string
+  /** The persisted manual connection decision, when supported by the host. */
+  readonly connectionIntent?: 'active' | 'paused'
   readonly nodeId: string
   /** Absolute path of the file a save writes. */
   readonly configFile: string

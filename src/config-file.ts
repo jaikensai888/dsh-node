@@ -27,6 +27,9 @@ export const CONFIG_FILE_NAME = 'config.json'
 /** Schema version of the stored document, so a future change can migrate. */
 export const CONFIG_FILE_VERSION = 1
 
+/** Whether the node should keep its outbound link active across restarts. */
+export type ConnectionIntent = 'active' | 'paused'
+
 /** The fields the panel may persist. Everything else stays file-configured. */
 export interface StoredNodeConfig {
   /** Coordinator endpoint, `ws://` or `wss://`, validated by the host before it lands here. */
@@ -37,6 +40,8 @@ export interface StoredNodeConfig {
   readonly nodeName?: string
   /** Display metadata; never authentication material. */
   readonly role?: string
+  /** Manual connection decision; this is independent of the resolved credentials. */
+  readonly connectionIntent?: ConnectionIntent
   /** ISO timestamp of the last write, for humans. */
   readonly updatedAt?: string
 }
@@ -76,11 +81,15 @@ function pickStored(value: unknown): StoredNodeConfig {
   const nodeName = text('nodeName')
   const role = text('role')
   const updatedAt = text('updatedAt')
+  const connectionIntent = record['connectionIntent'] === 'paused' || record['connectionIntent'] === 'active'
+    ? record['connectionIntent'] as ConnectionIntent
+    : undefined
   return {
     ...(coordinatorUrl === undefined ? {} : { coordinatorUrl }),
     ...(token === undefined ? {} : { token }),
     ...(nodeName === undefined ? {} : { nodeName }),
     ...(role === undefined ? {} : { role }),
+    ...(connectionIntent === undefined ? {} : { connectionIntent }),
     ...(updatedAt === undefined ? {} : { updatedAt }),
   }
 }
@@ -203,6 +212,7 @@ export function describeStoredConfig(stored: StoredNodeConfig | undefined): Reco
     tokenSet: typeof stored.token === 'string' && stored.token !== '',
     nodeName: stored.nodeName ?? null,
     role: stored.role ?? null,
+    connectionIntent: stored.connectionIntent ?? 'active',
     updatedAt: stored.updatedAt ?? null,
   }
 }

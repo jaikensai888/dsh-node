@@ -115,6 +115,7 @@ describe('protocol constants', () => {
       'backoff',
       'closing',
       'connecting',
+      'paused',
       'ready',
       'stopped',
       'unconfigured',

@@ -172,6 +172,15 @@ const withConfig = createNodeRouteHandler({
   config: configSurface().surface,
 })
 
+function connectionSurface() {
+  let state: 'active' | 'paused' = 'active'
+  return {
+    state: () => state,
+    connect: async () => { state = 'active'; return state },
+    disconnect: async () => { state = 'paused'; return state },
+  }
+}
+
 describe('the trusted-request fence', () => {
   it('accepts loopback authorities and an absent Origin', () => {
     expect(isTrustedNodeRequest({ headers: { host: '127.0.0.1:43120' } }, [])).toBe(true)
@@ -452,5 +461,26 @@ describe('the configuration route', () => {
     expect(result.status).toBe(200)
     expect(result.text).toBe('')
     expect(result.headers['cache-control']).toBe('no-store')
+  })
+})
+
+describe('the connection control routes', () => {
+  it('disconnects and reconnects through the same trusted node route', async () => {
+    const connection = connectionSurface()
+    const route = createNodeRouteHandler({ status: () => snapshot({ state: connection.state() === 'paused' ? 'paused' : 'ready' }), trustedHosts: () => [], connection })
+
+    const disconnected = await callAsync(route, { method: 'POST', url: `${NODE_ROUTE_PREFIX}/api/disconnect` })
+    expect(disconnected.status).toBe(200)
+    expect(disconnected.body).toEqual({ ok: true, value: { connectionIntent: 'paused' } })
+
+    const reconnected = await callAsync(route, { method: 'POST', url: `${NODE_ROUTE_PREFIX}/api/connect` })
+    expect(reconnected.status).toBe(200)
+    expect(reconnected.body).toEqual({ ok: true, value: { connectionIntent: 'active' } })
+  })
+
+  it('does not expose a connection control route without a control surface', async () => {
+    const missing = await callAsync(handler, { method: 'POST', url: `${NODE_ROUTE_PREFIX}/api/disconnect` })
+    expect(missing.status).toBe(404)
+    expect(missing.body).toMatchObject({ ok: false, error: { code: 'not-found' } })
   })
 })

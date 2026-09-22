@@ -19,6 +19,8 @@ export const NODE_STATES = [
   'unconfigured',
   /** Not started, stopped, or stopped by invalid configuration. */
   'stopped',
+  /** Manually disconnected; no reconnect is scheduled until the operator connects again. */
+  'paused',
   /** Opening the WebSocket (TCP/TLS). */
   'connecting',
   /** Socket is up; `hello` / `hello.ok` handshake is in progress. */

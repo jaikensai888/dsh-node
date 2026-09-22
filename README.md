@@ -31,13 +31,13 @@ dsh-node/
 │   ├── config.ts             # 配置校验（唯一权威，启动与面板共用）
 │   ├── config-file.ts        # 面板写的 config.json（原子写、0600）
 │   ├── config-service.ts     # 面板的读写路径与宿主重建
-│   ├── http-api.ts           # /dsh-node/* 本地路由（含唯一的写路由）
+│   ├── http-api.ts           # /dsh-node/* 本地路由（配置与连接控制）
 │   ├── identity.ts           # nodeId 持久化
 │   ├── status.ts             # 脱敏状态快照与结构化日志
 │   ├── net/trust-fence.ts    # DNS rebinding / 跨站请求围栏
 │   ├── admin/                # nodeAdmin/* 管理面：路径策略、skill、审计
 │   └── client/               # 浏览器半侧：侧边栏页脚 + 状态/配置面板
-├── test/                     # 13 个文件 / 463 个测试
+├── test/                     # 13 个文件 / 468 个测试
 ├── tools/fake-coordinator.mjs  # 本地假协调器，用来观察握手与转发
 └── docs/
     ├── COORDINATOR.md        # 与协调器的对接契约
@@ -164,7 +164,7 @@ curl http://127.0.0.1:<port>/dsh-node/api/status
 curl http://127.0.0.1:<port>/dsh-node/api/config
 ```
 
-界面上的状态点：**实心绿 = 已连接**，环状琥珀 = 连接中/退避重连，空心灰 = 未配置。
+界面上的状态点：**实心绿 = 已连接**，环状琥珀 = 连接中/退避重连，空心灰 = 未配置或已断开。
 悬停有完整句子，形状本身也区分状态（不依赖颜色）。
 
 ### 5. 还没有协调器？先和假协调器握手
@@ -196,9 +196,10 @@ dsh plugin --profile desktop remove dsh-node
 
 ## 状态与接口
 
-状态机：`unconfigured` → `connecting` → `authenticating` → `ready`；
+状态机：`unconfigured` → `connecting` → `authenticating` → `ready`；手动断开进入 `paused`；
 失败走 `backoff`（指数退避 + 抖动）或 `auth_failed`（凭证被拒，慢速有限重试）；
-退出走 `closing`。**未配置不是错误**：不建连接、不进重连循环。
+退出走 `closing`。**未配置不是错误**：不建连接、不进重连循环。`paused` 表示操作者
+明确断开，期间不会自动重连，必须点击「连接」恢复。
 
 本地路由（前缀 `/dsh-node`，全部经过信任围栏）：
 
@@ -206,9 +207,23 @@ dsh plugin --profile desktop remove dsh-node
 | --- | --- | --- |
 | GET | `/api/status` | 脱敏状态快照，界面状态点的数据源 |
 | GET | `/api/config` | 当前配置（**不含令牌**，只有 `tokenSet`） |
-| POST | `/api/config` | 保存配置并立即重连 —— **全插件唯一的写路由** |
+| POST | `/api/config` | 保存配置；active 意图下立即重连，paused 意图下保持断开 |
+| POST | `/api/connect` | 恢复 active 意图并立即发起连接 |
+| POST | `/api/disconnect` | 保存 paused 意图、关闭当前连接并停止自动重连 |
 | GET | `/api/diagnostics` | 宿主对客户端模块合成的判断（排查「界面里没有它」） |
 | GET | `/ping` | 存活探测 |
+
+`/api/connect` 和 `/api/disconnect` 不需要请求体，返回：
+
+```json
+{
+  "ok": true,
+  "value": { "connectionIntent": "paused" }
+}
+```
+
+三个写路由都经过同一套本地信任围栏；连接控制只改变本节点的出站连接意图，
+不会改变 `coordinatorUrl`、node token 或 node identity。
 
 `nodeAdmin/*` 是本插件唯一能改动本机的部分（13 个端点）：
 
@@ -270,7 +285,7 @@ dsh plugin --profile desktop remove dsh-node
 | 日志里 URL 只留协议+主机+端口 | `redactUrl()`，有测试 |
 | 不新增 shell / eval / 任意模块加载 | 源码里没有 `child_process` / `eval` / `new Function` / `require(` / 动态 `import()` |
 | 不监听任何入站端口 | 源码里没有 `WebSocketServer` / `createServer` / `.listen(`，有架构守卫逐文件扫描 |
-| 只有一条前缀路由，只有一个写路由 | `webServer.register` 只允许出现在 `index.ts` 一处；写路由只有 `POST /api/config` |
+| 只有一条前缀路由，连接控制不对外监听 | `webServer.register` 只允许出现在 `index.ts` 一处；写路由仅限 `POST /api/config`、`POST /api/connect`、`POST /api/disconnect` |
 | 不自动重放未确认的写操作 | 断线时在途请求以 `node/connection-lost` 失败，绝不重发 |
 
 界面**故意**不提供放宽 `allowedRoots`（文件系统围栏）的入口：把围栏打开不该是一次点击的事。
@@ -298,10 +313,10 @@ dsh plugin --profile desktop remove dsh-node
 - [x] 跨实现联调：真的节点 × 真的协调器
 
 ### 状态入口与配置面板 ✅
-- [x] 侧边栏页脚一行「节点」：形状+颜色双重编码的状态点，浮层显示脱敏状态
+- [x] 侧边栏页脚一行「节点」：形状+颜色双重编码的状态点，浮层显示脱敏状态，并可手动连接/断开
 - [x] 面板内配置协调器地址与令牌，保存即重连（不用重启 DSH）
 - [x] 未配置的节点也会加载身份，使 `nodeId` 在首次连接前就可用
-- [x] 463 个测试 / 13 个文件，含架构守卫（不开监听、只允许一条路由、宿主半侧不碰 DOM）
+- [x] 468 个测试 / 13 个文件，含架构守卫（不开监听、只允许一条路由、宿主半侧不碰 DOM）
 
 ## 下一步与已知限制
 

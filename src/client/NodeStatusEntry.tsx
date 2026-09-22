@@ -18,7 +18,7 @@ import type { CSSProperties } from 'react'
 import { ConfigPanel } from './ConfigPanel.js'
 import { NODE_ENTRY_LABEL, nodeVisual, toneColor, unavailableHint, UNCONFIGURED_HINT } from './mapping.js'
 import type { NodeVisual } from './mapping.js'
-import { createStatusPoller, type NodeStatusResult } from './status-source.js'
+import { createStatusPoller, setNodeConnection, type NodeStatusResult } from './status-source.js'
 
 const ROW_HEIGHT_PX = 42
 const RAIL_BUTTON_PX = 36
@@ -144,6 +144,12 @@ function Popover({ result, onClose, onRefresh, anchor }: {
   const snapshot = result.snapshot
   const visual = nodeVisual(result.input)
   const stateKey = result.input.kind === 'status' ? result.input.state : result.input.kind
+  const canControlConnection = snapshot !== undefined && [
+    'ready', 'connecting', 'authenticating', 'backoff', 'auth_failed', 'closing', 'paused',
+  ].includes(snapshot.state)
+  const connectionAction = snapshot?.state === 'paused' ? 'connect' : 'disconnect'
+  const [connectionBusy, setConnectionBusy] = useState(false)
+  const [connectionError, setConnectionError] = useState<string | undefined>(undefined)
   // An unconfigured node has nothing else to say, and configuring it is the only
   // useful action — so the form opens by itself, once. The latch matters: the poll
   // result is a fresh object every tick, and re-asserting "open" on every poll would
@@ -247,6 +253,42 @@ function Popover({ result, onClose, onRefresh, anchor }: {
       {rows.length > 0 ? rows : null}
       {snapshot === undefined && result.input.kind !== 'unavailable' ? (
         <div style={{ fontSize: 12, color: 'var(--dsw-alias-label-tertiary, #8b949e)' }}>尚未读到状态…</div>
+      ) : null}
+
+      {canControlConnection ? (
+        <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.24))' }}>
+          <button
+            type="button"
+            data-dsh-node-connection-action={connectionAction}
+            disabled={connectionBusy}
+            onClick={() => {
+              setConnectionBusy(true)
+              setConnectionError(undefined)
+              void setNodeConnection(connectionAction).then(
+                () => { onRefresh() },
+                (error: unknown) => { setConnectionError(error instanceof Error ? error.message : String(error)) },
+              ).finally(() => { setConnectionBusy(false) })
+            }}
+            style={{
+              width: '100%',
+              padding: '5px 8px',
+              fontSize: 12,
+              fontFamily: 'inherit',
+              borderRadius: 6,
+              cursor: connectionBusy ? 'wait' : 'pointer',
+              border: '1px solid var(--dsw-alias-border-secondary, rgba(127,127,127,0.32))',
+              background: 'transparent',
+              color: 'inherit',
+            }}
+          >
+            {connectionBusy ? '处理中…' : connectionAction === 'connect' ? '连接' : '断开'}
+          </button>
+          {connectionError === undefined ? null : (
+            <div style={{ marginTop: 5, fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-danger, #e5534b)' }}>
+              ⚠ {connectionError}
+            </div>
+          )}
+        </div>
       ) : null}
 
       <div style={{ marginTop: 6 }}>

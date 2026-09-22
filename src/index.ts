@@ -20,7 +20,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ADMIN_DESCRIPTORS, ADMIN_SERVICE_KEY, NodeAdminOwner } from './admin/service.js'
 import { resolveNodeConfig, Config, type DshNodeRuntimeConfig, type NodeConfigResolution } from './config.js'
-import { mergeNodeConfig, resolveConfigFile, type StoredNodeConfig } from './config-file.js'
+import { mergeNodeConfig, resolveConfigFile, type ConnectionIntent, type StoredNodeConfig } from './config-file.js'
 import { NodeConfigService, loadStoredConfig } from './config-service.js'
 import {
   Connector,
@@ -32,7 +32,14 @@ import {
 import { NodeError, RemoteCodeError, nodeFailure, type NodeFailure } from './errors.js'
 import { capabilitySurfaceHash, parseEndpoint, parseRequestArgs } from './frame-codec.js'
 import { loadOrCreateIdentity, resolveIdentityFile, type NodeIdentity } from './identity.js'
-import { createNodeRouteHandler, NODE_ROUTE_PREFIX, type NodeConfigSurface, type NodeDiagnostics, type NodeStatusView } from './http-api.js'
+import {
+  createNodeRouteHandler,
+  NODE_ROUTE_PREFIX,
+  type NodeConfigSurface,
+  type NodeConnectionSurface,
+  type NodeDiagnostics,
+  type NodeStatusView,
+} from './http-api.js'
 import {
   PROTOCOL_VERSION,
   type DshNodeStatus,
@@ -59,7 +66,7 @@ export { RequestManager } from './request-manager.js'
 export { Connector, createNodeTimers } from './connector.js'
 export { createNodeLogger, redactUrl, scrubText, REDACTED } from './status.js'
 export { createNodeRouteHandler, NODE_ROUTE_PREFIX, HttpFailure, MAX_CONFIG_BODY_BYTES } from './http-api.js'
-export type { NodeConfigSurface, NodeConfigView, NodeDiagnostics, NodeRouteDeps, NodeStatusView } from './http-api.js'
+export type { NodeConfigSurface, NodeConfigView, NodeConnectionSurface, NodeDiagnostics, NodeRouteDeps, NodeStatusView } from './http-api.js'
 export {
   CONFIG_FILE_NAME,
   CONFIG_FILE_VERSION,
@@ -69,7 +76,7 @@ export {
   resolveConfigFile,
   writeConfigFile,
 } from './config-file.js'
-export type { ConfigFileRead, StoredNodeConfig } from './config-file.js'
+export type { ConfigFileRead, ConnectionIntent, StoredNodeConfig } from './config-file.js'
 export { foldSubmission, loadStoredConfig, NodeConfigService, readSubmission } from './config-service.js'
 export { isLoopbackHostname, isTrustedNodeRequest } from './net/trust-fence.js'
 export * from './protocol.js'
@@ -290,6 +297,8 @@ export interface DshNodeHostOptions {
   readonly ctx: NodeHostContext
   /** Raw deployment input, resolved with {@link resolveNodeConfig} unless a resolution is given. */
   readonly bootstrap?: unknown
+  /** Persisted manual decision; active by default. */
+  readonly connectionIntent?: ConnectionIntent
   /** Pre-resolved configuration, for tests that want to fix the environment. */
   readonly resolution?: NodeConfigResolution
   /** Environment mapping used for config and identity resolution. */
@@ -333,6 +342,7 @@ export class DshNodeHost implements ConnectorDelegate {
   private capabilityIndex: CapabilityIndex | undefined
   private capabilitiesStale = true
   private running = false
+  private connectionIntent: ConnectionIntent
   private lastState: DshNodeStatus['state']
 
   private currentError: { code: string; message: string; at: string } | undefined
@@ -346,6 +356,7 @@ export class DshNodeHost implements ConnectorDelegate {
     this.ctx = options.ctx
     this.env = options.env ?? process.env
     this.hostOptions = options
+    this.connectionIntent = options.connectionIntent ?? 'active'
     this.resolution = options.resolution ?? resolveNodeConfig(options.bootstrap, this.env)
     // Prefer the harness logger over `console`: `console.log` never reaches the
     // DSH log file, so a node logging only there is invisible to the operator in
@@ -386,7 +397,9 @@ export class DshNodeHost implements ConnectorDelegate {
       ...(options.streamTimers === undefined ? {} : { timers: options.streamTimers }),
       onEvent: event => this.onStreamEvent(event),
     })
-    this.lastState = this.resolution.status === 'ok' ? 'stopped' : 'unconfigured'
+    this.lastState = this.resolution.status === 'ok'
+      ? this.connectionIntent === 'paused' ? 'paused' : 'stopped'
+      : 'unconfigured'
     this.startedAtMs = this.now()
   }
 
@@ -435,6 +448,11 @@ export class DshNodeHost implements ConnectorDelegate {
   /** Number of streams currently open. */
   get activeStreams(): number {
     return this.streams.size
+  }
+
+  /** The persisted manual connection decision. */
+  get connectionMode(): ConnectionIntent {
+    return this.connectionIntent
   }
 
   /** When this host was constructed, for the uptime the diagnostics report. */
@@ -550,8 +568,17 @@ export class DshNodeHost implements ConnectorDelegate {
       mode: this.config.mode,
       endpoints: this.capabilityIndex?.remotes.length ?? 0,
     })
-    this.connector.start()
-    this.lastState = this.connector.state
+    if (this.connectionIntent === 'paused') {
+      this.lastState = 'paused'
+      this.logger.info('dsh-node/state-changed', {
+        state: 'paused',
+        reason: 'manual disconnect is persisted; waiting for an explicit connect action',
+        nodeId: this.nodeId,
+      })
+    } else {
+      this.connector.start()
+      this.lastState = this.connector.state
+    }
   }
 
   /**
@@ -594,6 +621,40 @@ export class DshNodeHost implements ConnectorDelegate {
     this.lastState = this.resolution.status === 'ok' ? 'stopped' : 'unconfigured'
   }
 
+  /** Disconnect without disposing the host, and suppress automatic reconnects. */
+  async disconnect(): Promise<void> {
+    this.connectionIntent = 'paused'
+    if (!this.running) {
+      if (this.resolution.status === 'ok') this.lastState = 'paused'
+      return
+    }
+    this.streams.failAll(
+      { code: 'node/shutdown', message: 'node is manually disconnected', details: { reason: 'manual disconnect' } },
+      true,
+    )
+    this.requests.failAll(new NodeError('node/shutdown', 'node is manually disconnected', { reason: 'manual disconnect' }))
+    const connector = this.connector
+    if (connector !== undefined) await connector.stop('manual disconnect')
+    this.currentError = undefined
+    this.lastState = this.resolution.status === 'ok' ? 'paused' : 'unconfigured'
+    this.logger.info('dsh-node/disconnected', { reason: 'manual disconnect', nodeId: this.nodeId })
+  }
+
+  /** Resume an explicitly disconnected host and start one outbound attempt. */
+  async connect(): Promise<void> {
+    this.connectionIntent = 'active'
+    if (!this.running) {
+      await this.start()
+      return
+    }
+    if (this.resolution.status !== 'ok') return
+    const connector = this.connector
+    if (connector === undefined) return
+    connector.start()
+    this.lastState = connector.state
+    this.logger.info('dsh-node/reconnect-requested', { nodeId: this.nodeId, reason: 'manual connect' })
+  }
+
   /**
    * Drop any backoff and retry immediately.
    *
@@ -601,6 +662,7 @@ export class DshNodeHost implements ConnectorDelegate {
    * retry, and starting a reconnect loop is exactly what those states forbid.
    */
   reconnectNow(): void {
+    if (this.connectionIntent === 'paused') return
     this.connector?.reconnectNow()
   }
 
@@ -1114,6 +1176,7 @@ function installStatusRoute(
   ctx: NodeHostContext,
   host: () => DshNodeHost | undefined,
   config: NodeConfigSurface | undefined,
+  connection: NodeConnectionSurface | undefined,
 ): void {
   const register = (scoped: Context): void => {
     const webServer = (scoped as Context & { webServer?: WebServerLike }).webServer
@@ -1162,6 +1225,7 @@ function installStatusRoute(
           },
           diagnostics: () => readClientModules(ctx),
           ...(config === undefined ? {} : { config }),
+          ...(connection === undefined ? {} : { connection }),
         }),
       })
       return () => { dispose() }
@@ -1271,7 +1335,11 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
 
   const bootNow = async (stored: StoredNodeConfig | undefined): Promise<void> => {
     if (disposed) return
-    const host = new DshNodeHost({ ctx, bootstrap: mergeNodeConfig(profileConfig(), stored) })
+    const host = new DshNodeHost({
+      ctx,
+      bootstrap: mergeNodeConfig(profileConfig(), stored),
+      ...(stored?.connectionIntent === undefined ? {} : { connectionIntent: stored.connectionIntent }),
+    })
     // Mounted before the connector starts, so the very first `ready` frame already
     // advertises `nodeAdmin/*`.
     const disposeAdmin = installAdminSurface(ctx, host)
@@ -1324,6 +1392,20 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
     now: Date.now,
   })
 
+  const connection: NodeConnectionSurface = {
+    state: () => configService.read().connectionIntent ?? 'active',
+    connect: async () => {
+      await configService.setConnectionIntent('active')
+      await current?.connect()
+      return configService.read().connectionIntent ?? 'active'
+    },
+    disconnect: async () => {
+      await configService.setConnectionIntent('paused')
+      await current?.disconnect()
+      return configService.read().connectionIntent ?? 'paused'
+    },
+  }
+
   const initialise = (): Promise<void> => enqueue(async () => {
     const read = await loadStoredConfig(file)
     configService.seed(read)
@@ -1342,7 +1424,7 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
     }
   }, 'dsh-node: outbound WebSocket node')
 
-  installStatusRoute(ctx, () => current, configService)
+  installStatusRoute(ctx, () => current, configService, connection)
 }
 
 /** Plugin version, kept in sync with `package.json` by a test. */

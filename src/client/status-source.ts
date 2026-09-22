@@ -19,6 +19,12 @@ import type { NodeUiInput } from './mapping.js'
 /** The status route this client reads. Relative, so it follows whatever host serves the page. */
 export const STATUS_PATH = '/dsh-node/api/status'
 
+/** The two local transport-control routes used by the popover. */
+export const CONNECTION_PATHS = {
+  connect: '/dsh-node/api/connect',
+  disconnect: '/dsh-node/api/disconnect',
+} as const
+
 /** Cadence while the popover is closed: one poll per 15 seconds. */
 export const IDLE_INTERVAL_MS = 15_000
 
@@ -79,6 +85,34 @@ export const fetchNodeStatus: StatusFetcher = async (signal) => {
   const value = body.value as NodeStatusSnapshot
   if (typeof value.state !== 'string') throw new Error('响应缺少 state 字段')
   return value
+}
+
+/** The response returned by a manual connection action. */
+export interface NodeConnectionResult {
+  readonly connectionIntent: 'active' | 'paused'
+}
+
+/** Set the node's persistent connection intent. */
+export async function setNodeConnection(action: keyof typeof CONNECTION_PATHS): Promise<NodeConnectionResult> {
+  const response = await fetch(CONNECTION_PATHS[action], {
+    method: 'POST',
+    headers: { accept: 'application/json' },
+    cache: 'no-store',
+  })
+  let body: { ok?: unknown; value?: unknown; error?: { code?: unknown; message?: unknown } }
+  try {
+    body = (await response.json()) as typeof body
+  } catch {
+    throw new Error(`HTTP ${String(response.status)}：响应不是 JSON`)
+  }
+  if (!response.ok || body.ok !== true || typeof body.value !== 'object' || body.value === null) {
+    const code = typeof body.error?.code === 'string' ? body.error.code : `HTTP ${String(response.status)}`
+    const message = typeof body.error?.message === 'string' ? body.error.message : ''
+    throw new Error(message === '' ? code : `${code}：${message}`)
+  }
+  const intent = (body.value as { connectionIntent?: unknown }).connectionIntent
+  if (intent !== 'active' && intent !== 'paused') throw new Error('响应缺少 connectionIntent 字段')
+  return { connectionIntent: intent }
 }
 
 /** Timer seam, so tests drive the cadence instead of waiting on it. */

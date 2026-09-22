@@ -924,6 +924,31 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
     expect(result.result).toEqual({ ok: true, value: { echoed: 'again', at: 'fixture' } })
   }, 30_000)
 
+  it('pauses reconnects on manual disconnect and resumes on connect', async () => {
+    const first = await connectNode()
+    const node = root.get('dshNode', false) as unknown as {
+      status: NodeStatusView
+      disconnect(): Promise<void>
+      connect(): Promise<void>
+    }
+
+    await node.disconnect()
+    await eventually(() => (node.status.state === 'paused' ? true : undefined), 'the node to enter paused')
+    await eventually(() => (first.socket.readyState === 3 ? true : undefined), 'the manually disconnected socket to close')
+    const seen = coordinator.sessions.length
+    await delay(350)
+    expect(coordinator.sessions.length).toBe(seen)
+
+    await node.connect()
+    const second = await eventually(() => {
+      const latest = coordinator.sessions.at(-1)
+      return coordinator.sessions.length > seen && latest !== first && latest?.has('hello') === true ? latest : undefined
+    }, 'a manually requested reconnect')
+    await coordinator.acceptHandshake()
+    await coordinator.waitForReady(second)
+    await eventually(() => (node.status.state === 'ready' ? true : undefined), 'the node to be ready after connect')
+  }, 30_000)
+
   it('fails an in-flight request when the link drops, and never replays it', async () => {
     // A gated owner method keeps the request in flight across the drop.
     let openGate: () => void = () => {}

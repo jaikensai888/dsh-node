@@ -23,6 +23,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { ConnectionIntent } from './config-file.js'
 import type { DshNodeStatus } from './protocol.js'
 import { isTrustedNodeRequest } from './net/trust-fence.js'
 
@@ -65,6 +66,8 @@ export interface NodeRouteDeps {
    * keys off this field rather than off the path.
    */
   readonly config?: NodeConfigSurface
+  /** Manual transport control, present when the host can persist connection intent. */
+  readonly connection?: NodeConnectionSurface
 }
 
 /** A coded failure, the shape the client already knows how to render. */
@@ -106,6 +109,13 @@ export interface NodeConfigSurface {
    * anything the operator can fix, so the panel renders the reason and stays editable.
    */
   write: (input: Record<string, unknown>) => Promise<NodeConfigView>
+}
+
+/** The two actions exposed by the node's status popover. */
+export interface NodeConnectionSurface {
+  readonly state: () => ConnectionIntent
+  readonly connect: () => Promise<ConnectionIntent> | ConnectionIntent
+  readonly disconnect: () => Promise<ConnectionIntent> | ConnectionIntent
 }
 
 /** A coded failure carrying the HTTP status the route should answer with. */
@@ -197,6 +207,8 @@ export interface NodeConfigView {
   readonly tokenSet: boolean
   readonly nodeName?: string
   readonly role?: string
+  /** The persisted manual connection decision; absent means active for old hosts. */
+  readonly connectionIntent?: ConnectionIntent
   /** So an operator can register this node on the Coordinator side. */
   readonly nodeId: string
   /** Absolute path of the file a save writes, so it can be found and protected. */
@@ -248,6 +260,21 @@ export function createNodeRouteHandler(deps: NodeRouteDeps): (request: IncomingM
     sendJson(response, 200, { ok: true, value: view })
   }
 
+  const changeConnection = async (
+    request: IncomingMessage,
+    response: ServerResponse,
+    action: 'connect' | 'disconnect',
+  ): Promise<void> => {
+    if (deps.connection === undefined) {
+      sendError(response, 404, 'not-found', `unknown dsh-node route: ${request.url ?? ''}`)
+      return
+    }
+    const intent = action === 'connect'
+      ? await deps.connection.connect()
+      : await deps.connection.disconnect()
+    sendJson(response, 200, { ok: true, value: { connectionIntent: intent } })
+  }
+
   /**
    * Answer one request.
    * @returns a promise only for the write route; `undefined` means "already answered".
@@ -262,15 +289,26 @@ export function createNodeRouteHandler(deps: NodeRouteDeps): (request: IncomingM
     const pathname = new URL(request.url ?? '/', 'http://dsh.invalid').pathname
     const subPath = pathname.startsWith(NODE_ROUTE_PREFIX) ? pathname.slice(NODE_ROUTE_PREFIX.length) : pathname
     const writable = deps.config !== undefined && subPath === '/api/config'
+    const connectionAction = subPath === '/api/connect' || subPath === '/api/disconnect'
+    const connectionWritable = deps.connection !== undefined && connectionAction
 
-    if (method !== 'GET' && method !== 'HEAD' && !(method === 'POST' && writable)) {
+    if (connectionAction && deps.connection === undefined) {
+      sendError(response, 404, 'not-found', `unknown dsh-node route: ${pathname}`)
+      return undefined
+    }
+
+    if (method !== 'GET' && method !== 'HEAD' && !(method === 'POST' && (writable || connectionWritable))) {
       // Exactly one route accepts a write; everything else is a read.
-      response.setHeader('allow', writable ? 'GET, HEAD, POST' : 'GET, HEAD')
+      response.setHeader('allow', writable ? 'GET, HEAD, POST' : connectionAction ? 'POST' : 'GET, HEAD')
       sendError(
         response,
         405,
         'method-not-allowed',
-        writable ? `${NODE_ROUTE_PREFIX}/api/config accepts GET, HEAD, POST` : `${NODE_ROUTE_PREFIX} is read-only`,
+        writable
+          ? `${NODE_ROUTE_PREFIX}/api/config accepts GET, HEAD, POST`
+          : connectionAction
+            ? `${NODE_ROUTE_PREFIX}${subPath} accepts POST`
+            : `${NODE_ROUTE_PREFIX} is read-only`,
       )
       return undefined
     }
@@ -291,6 +329,14 @@ export function createNodeRouteHandler(deps: NodeRouteDeps): (request: IncomingM
       if (method === 'POST') return writeConfig(request, response, deps.config)
       sendJson(response, 200, { ok: true, value: deps.config.read() })
       return undefined
+    }
+    if (connectionAction) {
+      if (method !== 'POST') {
+        response.setHeader('allow', 'POST')
+        sendError(response, 405, 'method-not-allowed', `${NODE_ROUTE_PREFIX}${subPath} accepts POST`)
+        return undefined
+      }
+      return changeConnection(request, response, subPath === '/api/connect' ? 'connect' : 'disconnect')
     }
     if (subPath === '/api/status') {
       sendJson(response, 200, { ok: true, value: deps.status() })

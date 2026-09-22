@@ -88,7 +88,7 @@ function scriptedFetcher(): {
 
 describe('state → visual', () => {
   it('maps every node state to a distinct, described tone', () => {
-    const states = ['unconfigured', 'stopped', 'connecting', 'authenticating', 'ready', 'backoff', 'auth_failed', 'closing'] as const
+    const states = ['unconfigured', 'stopped', 'connecting', 'authenticating', 'ready', 'backoff', 'auth_failed', 'closing', 'paused'] as const
     const tones = new Map<string, string>()
     for (const state of states) {
       const visual = nodeVisual({ kind: 'status', state })
@@ -102,6 +102,7 @@ describe('state → visual', () => {
     expect(nodeVisual({ kind: 'status', state: 'unconfigured' })).toMatchObject({ tone: 'idle', dot: 'hollow' })
     expect(nodeVisual({ kind: 'status', state: 'connecting' })).toMatchObject({ tone: 'pending', dot: 'ring', animated: true })
     expect(nodeVisual({ kind: 'status', state: 'auth_failed' })).toMatchObject({ tone: 'bad', dot: 'alert' })
+    expect(nodeVisual({ kind: 'status', state: 'paused' })).toMatchObject({ tone: 'idle', dot: 'hollow', label: '已断开' })
   })
 
   it('explains why, and how many retries, in the tooltip', () => {

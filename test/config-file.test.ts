@@ -60,10 +60,10 @@ describe('reading the file', () => {
   })
 
   it('reads a written document back unchanged', async () => {
-    await writeConfigFile(file, { coordinatorUrl: WS_URL, token: TOKEN, nodeName: 'desk', role: 'build' })
+    await writeConfigFile(file, { coordinatorUrl: WS_URL, token: TOKEN, nodeName: 'desk', role: 'build', connectionIntent: 'paused' })
     const read = await readConfigFile(file)
     expect(read.error).toBeUndefined()
-    expect(read.config).toEqual({ coordinatorUrl: WS_URL, token: TOKEN, nodeName: 'desk', role: 'build' })
+    expect(read.config).toEqual({ coordinatorUrl: WS_URL, token: TOKEN, nodeName: 'desk', role: 'build', connectionIntent: 'paused' })
     // Versioned on disk, so a future schema change can migrate instead of guess.
     const onDisk = JSON.parse(await readFile(file, 'utf8')) as { version: number }
     expect(onDisk.version).toBe(CONFIG_FILE_VERSION)
@@ -142,6 +142,10 @@ describe('merging the stored layer over the profile', () => {
   it('returns the profile untouched when there is no document', () => {
     expect(mergeNodeConfig({ coordinatorUrl: WS_URL }, undefined)).toEqual({ coordinatorUrl: WS_URL })
     expect(mergeNodeConfig(undefined, { token: TOKEN })).toEqual({ auth: { token: TOKEN } })
+  })
+
+  it('does not feed the connection intent into runtime configuration', () => {
+    expect(mergeNodeConfig({ coordinatorUrl: WS_URL }, { connectionIntent: 'paused' })).toEqual({ coordinatorUrl: WS_URL })
   })
 })
 
@@ -331,6 +335,20 @@ describe('the configuration service', () => {
     const { instance } = service({ env: {} })
     expect(instance.read().sources).toEqual({ coordinatorUrl: 'none', token: 'none' })
     expect(instance.read().tokenSet).toBe(false)
+  })
+
+  it('persists a manual disconnect without rebuilding the node', async () => {
+    const { instance, applied } = service({ stored: { coordinatorUrl: WS_URL, token: TOKEN }, env: {} })
+    expect(instance.read().connectionIntent).toBe('active')
+
+    const paused = await instance.setConnectionIntent('paused')
+    expect(paused.connectionIntent).toBe('paused')
+    expect(applied).toHaveLength(0)
+    expect((await readConfigFile(file)).config?.connectionIntent).toBe('paused')
+
+    const active = await instance.setConnectionIntent('active')
+    expect(active.connectionIntent).toBe('active')
+    expect(applied).toHaveLength(0)
   })
 
   it('surfaces a boot read failure without blocking a save that fixes it', async () => {

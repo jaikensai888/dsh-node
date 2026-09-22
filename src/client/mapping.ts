@@ -23,6 +23,7 @@
 export type NodeUiState =
   | 'unconfigured'
   | 'stopped'
+  | 'paused'
   | 'connecting'
   | 'authenticating'
   | 'ready'
@@ -88,6 +89,7 @@ export function unavailableHint(reason: string): string {
 const STATE_LABELS: Record<NodeUiState, string> = {
   unconfigured: '未配置',
   stopped: '已停止',
+  paused: '已断开',
   connecting: '连接中',
   authenticating: '握手中',
   ready: '已连接',
@@ -102,6 +104,7 @@ const STATE_STYLE: Record<NodeUiState, { tone: NodeTone; dot: NodeDot; animated:
   // decision" — hollow, calm, never animated.
   unconfigured: { tone: 'idle', dot: 'hollow', animated: false },
   stopped: { tone: 'idle', dot: 'hollow', animated: false },
+  paused: { tone: 'idle', dot: 'hollow', animated: false },
   // Anything in flight breathes: it is the only cue that the app is still trying.
   connecting: { tone: 'pending', dot: 'ring', animated: true },
   authenticating: { tone: 'pending', dot: 'ring', animated: true },
@@ -171,6 +174,7 @@ export function nodeVisual(input: NodeUiInput): NodeVisual {
 function describeSuffix(input: { readonly state: string; readonly lastErrorCode?: string; readonly reconnectAttempt?: number }): string {
   if (input.state === 'unconfigured') return '（缺少 coordinatorUrl 或 token，未发起连接）'
   if (input.state === 'stopped') return '（已停止重试，需人工介入）'
+  if (input.state === 'paused') return '（已手动断开，点击连接恢复）'
   if (input.state === 'auth_failed') {
     return input.lastErrorCode === undefined ? '（请核对 token）' : `（${input.lastErrorCode}，请核对 token）`
   }
