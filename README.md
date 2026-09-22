@@ -148,11 +148,16 @@ dsh plugin --profile desktop add dsh-node@link:<本仓库绝对路径>
 
 **优先级：面板保存的值 > profile 配置 > 环境变量。** 面板里显示的「来源」就是这一层的答案。
 
+**连上之后还要让协调器认识它**：`nodeId` 由节点自己生成，操作者无法提前登记，所以要么把面板里的
+`nodeId` 复制到协调器逐台登记（`--node-env <nodeId>:<变量名>`，令牌就不会出现在进程列表里），
+要么在协调器里开一个登记密钥、让它自助登记 —— 两种方式见
+[`dsh-coordinator`](https://github.com/jaikensai888/dsh-coordinator) 的「登记、轮换、撤销」一节。
+
 ### 4. 验证
 
 ```bash
 # 组合树里有它，且只出现一次
-dsh --profile desktop --dump-config | Select-String "dsh-node"
+dsh --profile desktop --dump-config    # 在输出里找 dsh-node
 
 # 本地只读路由（不需要重启，直接开在 DSH 的 web 服务上）
 curl http://127.0.0.1:<port>/dsh-node/api/status
@@ -161,6 +166,25 @@ curl http://127.0.0.1:<port>/dsh-node/api/config
 
 界面上的状态点：**实心绿 = 已连接**，环状琥珀 = 连接中/退避重连，空心灰 = 未配置。
 悬停有完整句子，形状本身也区分状态（不依赖颜色）。
+
+### 5. 还没有协调器？先和假协调器握手
+
+`tools/fake-coordinator.mjs` 是一个只绑 `127.0.0.1` 的替身：把 `hello` 答成 `hello.ok`、
+把每一帧记进日志，并且**写盘前先把令牌替换掉**（只留下「有/无」和长度）。
+
+```bash
+node tools/fake-coordinator.mjs          # 握手：会打印 READY endpoints=<能力数> hash=<摘要>
+node tools/fake-coordinator.mjs --help   # 还能探针转发、开流、按帧取消
+```
+
+把面板里的地址临时填成 `ws://127.0.0.1:39471/node`（令牌随便填一个非空值）就能看到全过程。
+
+不想装进 profile 也可以只跑集成测试 —— 它是**真 Cordis + 真 Typert Gateway + 假协调器**，
+覆盖完整握手、unary 转发、能力门禁、断线不重放：
+
+```bash
+node node_modules/vitest/vitest.mjs run test/integration.test.ts
+```
 
 ### 卸载
 
@@ -195,6 +219,18 @@ dsh plugin --profile desktop remove dsh-node
 | `skillsList` / `skillRead` / `skillInstall` / `skillRemove` | skill 管理，只接受名字不接受路径 |
 
 默认允许的根是**活跃 session 的工作目录**（没有 session 就一律拒绝，不会退回整个磁盘）。
+
+### 连不上时看哪里
+
+| 症状 | 先看 | 常见原因 |
+| --- | --- | --- |
+| 侧边栏里根本没有「节点」 | `/api/diagnostics` 的 `selfComposed` | `false` = 宿主的客户端模块合成器**静默跳过**了这个包（有 `exports` 却没导出 `./package.json`）。改完必须重启 DSH |
+| 状态点一直是环状琥珀 | `/api/status` 的 `lastError` | 地址写错、对端没起。退避从 1s 起、每次 ×2、上限 30s、±20% 抖动；连上并稳定 30s 后退避复位 |
+| 落到 `auth_failed` | 面板的令牌 + 协调器的登记 | 令牌与 `nodeId` 绑定：换了机器、换了身份文件、或在协调器里撤销过，都要重新登记 |
+| 保存被拒（400） | 面板里的 ⚠ 文案 | `node/config-invalid`：地址不是 `ws://` / `wss://`；`node/config-incomplete`：地址或令牌为空 |
+| 403 | 请求来源 | 信任围栏：只接受本机回环或已声明的 Host，且拒绝 `sec-fetch-site: cross-site` 与外来 `Origin` |
+
+`POST /api/config` 被拒绝时**不会写入任何东西** —— 配置要么整体生效，要么完全不动。
 
 ## 协议（`dsh-node/1`）
 
@@ -258,7 +294,7 @@ dsh plugin --profile desktop remove dsh-node
 - [x] 操作审计环形缓冲
 
 ### Phase 4：协调器 ✅（在另一个仓库）
-- [x] `dsh-coordinator`：接受节点连接、转发调用、运维 API
+- [x] [`dsh-coordinator`](https://github.com/jaikensai888/dsh-coordinator)：接受节点连接、转发调用、运维 API
 - [x] 跨实现联调：真的节点 × 真的协调器
 
 ### 状态入口与配置面板 ✅
@@ -267,12 +303,17 @@ dsh plugin --profile desktop remove dsh-node
 - [x] 未配置的节点也会加载身份，使 `nodeId` 在首次连接前就可用
 - [x] 463 个测试 / 13 个文件，含架构守卫（不开监听、只允许一条路由、宿主半侧不碰 DOM）
 
-## 下一步
+## 下一步与已知限制
 
-1. 重启 DSH（客户端半侧与宿主路由都在启动时加载，热重载不覆盖它们）。
-2. 点左下角「节点」→ 填协调器地址与令牌 → 保存并连接。
-3. 复制面板里的 `nodeId`，在协调器侧批准这个节点。
+- **心跳语义：协议比实现松**。线协议只要求协调器能发心跳帧，没有规定它必须回 `pong`；而节点在
+  超过 2 个心跳周期收不到 `pong` 时会判为半开连接并重连。`dsh-coordinator` 会回，别的实现得照做。
+- **`rpc.cancel` 与请求超时还没有真实环境的证据**：两者都需要无副作用的慢方法，目前由
+  `request-manager` 单测与 `integration.test.ts` 的组合测试覆盖（`stream.cancel` 已在真机联调中验证）。
+- **`gateway/*` 原码保留要求 DSH ≥ `0.1.2-alpha.2`**：更早的 `alpha.1` 上网关自己就把边界错误压成
+  `internal`，本插件用 `wireStream.failure()` 忠实复现、不自己抠码。当前 `0.1.5-rc.2` 成立。
+- **源码模式插件的 namespace 枚举**依赖上游公开的 `typertRemote` 绑定：上游若改成私有，这类插件
+  会无法被派发（生成器插件不受影响）。
 
 ## License
 
-MIT
+MIT —— 见 [`LICENSE`](LICENSE)。
