@@ -33,6 +33,11 @@ import { NodeError, RemoteCodeError, nodeFailure, type NodeFailure } from './err
 import { capabilitySurfaceHash, parseEndpoint, parseRequestArgs } from './frame-codec.js'
 import { loadOrCreateIdentity, resolveIdentityFile, type NodeIdentity } from './identity.js'
 import {
+  NodeQuestionBridge,
+  QUESTIONS_DESCRIPTORS,
+  QUESTIONS_SERVICE_KEY,
+} from './user-questions.js'
+import {
   createNodeRouteHandler,
   NODE_ROUTE_PREFIX,
   type NodeConfigSurface,
@@ -1324,6 +1329,16 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
   let serviceDisposer: (() => void) | undefined
   let started: Promise<void> = Promise.resolve()
   let disposed = false
+  const questions = new NodeQuestionBridge()
+
+  ctx.effect(() => {
+    const dispose = installQuestionFallback(ctx, questions)
+    return () => {
+      dispose()
+      questions.dispose()
+    }
+  }, 'dsh-node:user-questions')
+
   /** Serialises boots and shutdowns, so two saves cannot race each other. */
   let queue: Promise<unknown> = Promise.resolve()
 
@@ -1341,8 +1356,8 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
       ...(stored?.connectionIntent === undefined ? {} : { connectionIntent: stored.connectionIntent }),
     })
     // Mounted before the connector starts, so the very first `ready` frame already
-    // advertises `nodeAdmin/*`.
-    const disposeAdmin = installAdminSurface(ctx, host)
+    // advertises the node's built-in management and question endpoints.
+    const disposeAdmin = installAdminSurface(ctx, host, questions)
     const disposeService = ctx.provide('dshNode', host)
     current = host
     adminDisposer = disposeAdmin
@@ -1493,7 +1508,11 @@ function typertHostRegistration(ctx: NodeHostContext): TypertHostRegistration | 
  * @param host - the node host the owner reads diagnostics from.
  * @returns a disposer that withdraws the descriptors and the service.
  */
-function installAdminSurface(ctx: NodeHostContext, host: DshNodeHost): () => Promise<void> {
+function installAdminSurface(
+  ctx: NodeHostContext,
+  host: DshNodeHost,
+  questions: NodeQuestionBridge,
+): () => Promise<void> {
   const config = host.config
   const owner = new NodeAdminOwner({
     host: {
@@ -1515,20 +1534,49 @@ function installAdminSurface(ctx: NodeHostContext, host: DshNodeHost): () => Pro
   })
 
   const disposeService = ctx.provide(ADMIN_SERVICE_KEY, owner)
+  const disposeQuestionsService = ctx.provide(QUESTIONS_SERVICE_KEY, questions)
   const disposeInvocations = typertHostRegistration(ctx)?.register({
     package: 'dsh-node',
     face: 'host',
     schemas: [],
     model: { services: [], events: [], objects: [] },
-    invocations: [...ADMIN_DESCRIPTORS],
+    invocations: [...ADMIN_DESCRIPTORS, ...QUESTIONS_DESCRIPTORS],
   })
 
   return async () => {
     disposeService()
+    disposeQuestionsService()
     // `undefined` when this DSH exposes no Host registration entry point, in which
     // case there is nothing to withdraw.
     await disposeInvocations?.()
   }
+}
+
+/** Install the user-question answerer before existing answerers, falling back only on NO_PROVIDER. */
+function installQuestionFallback(ctx: NodeHostContext, bridge: NodeQuestionBridge): () => boolean {
+  interface QuestionRequest {
+    readonly agent?: { readonly id?: unknown }
+  }
+  interface QuestionWaterfallContext {
+    on(
+      name: string,
+      listener: (request: QuestionRequest, next: () => Promise<unknown>) => Promise<unknown>,
+      options: { readonly global: true; readonly prepend: true },
+    ): () => boolean
+  }
+  const events = ctx as unknown as QuestionWaterfallContext
+  return events.on('user-questions/request', async (request, next) => {
+    try {
+      return await next()
+    } catch (error) {
+      const failure = error as { readonly name?: unknown; readonly code?: unknown }
+      if (failure?.name !== 'UserQuestionError' || failure.code !== 'NO_PROVIDER'
+        || typeof request.agent?.id !== 'string' || request.agent.id.trim() === '') {
+        throw error
+      }
+      return bridge.ask(request as Parameters<NodeQuestionBridge['ask']>[0])
+    }
+  }, { global: true, prepend: true })
 }
 
 /**

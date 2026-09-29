@@ -123,6 +123,7 @@ dsh-node/
 │   ├── frame-codec.ts        # endpoint / payload 校验、能力摘要哈希
 │   ├── request-manager.ts    # unary 在途请求、取消、超时
 │   ├── stream-manager.ts     # stream 泵、背压、恰好一个终态帧
+│   ├── user-questions.ts     # session 级 ask_user_question 待答队列与结构化结算
 │   ├── config.ts             # 配置校验（唯一权威，启动与面板共用）
 │   ├── config-file.ts        # 面板写的 config.json（原子写、0600）
 │   ├── config-service.ts     # 面板的读写路径与宿主重建
@@ -132,7 +133,7 @@ dsh-node/
 │   ├── net/trust-fence.ts    # DNS rebinding / 跨站请求围栏
 │   ├── admin/                # nodeAdmin/* 管理面：路径策略、skill、审计
 │   └── client/               # 浏览器半侧：侧边栏页脚 + 状态/配置面板
-├── test/                     # 13 个文件 / 468 个测试
+├── test/                     # 13 个文件 / 473 个测试
 ├── tools/fake-coordinator.mjs  # 本地假协调器，用来观察握手与转发
 └── docs/
     ├── COORDINATOR.md        # 与协调器的对接契约
@@ -325,6 +326,14 @@ curl http://127.0.0.1:<port>/dsh-node/api/config
 | `skillsList` / `skillRead` / `skillInstall` / `skillRemove` | skill 管理，只接受名字不接受路径 |
 
 默认允许的根是**活跃 session 的工作目录**（没有 session 就一律拒绝，不会退回整个磁盘）。
+
+`nodeQuestions/*` 把远程 Agent 的 `ask_user_question` 接回原始等待调用：本地 answerer 先处理，只有没有可用 answerer 时才将问题按 session 暴露给 master。问题只保存在内存中；回答保留 question ID、选项和自定义文本，取消/Agent 中止/插件卸载会结算并清理等待项。升级 dsh-node 后，远程节点才会在 `ready.capabilities` 中公布这三个接口：
+
+| 端点 | 作用 |
+| --- | --- |
+| `nodeQuestions/pending` | 读取指定 session 的待答问题 |
+| `nodeQuestions/answer` | 将结构化答案交回原始 `ask_user_question` |
+| `nodeQuestions/cancel` | 取消原始等待调用，不发送新 prompt |
 
 ### 与假协调器联调
 

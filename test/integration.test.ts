@@ -547,6 +547,132 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
     expect(JSON.stringify(status)).not.toContain(TOKEN)
   }, 20_000)
 
+  it('answers a remote user-question request with its original structured answer', async () => {
+    const session = await connectNode()
+    const questionContext = root as unknown as {
+      waterfall(name: string, request: unknown, next: () => Promise<unknown>): Promise<unknown>
+    }
+    const request = {
+      agent: { id: 'remote-session-1' },
+      questions: [{ id: 'choice', question: '选择方案', options: [{ label: 'A' }, { label: 'B' }] }],
+    }
+    const noProvider = Object.assign(new Error('no local answerer'), { name: 'UserQuestionError', code: 'NO_PROVIDER' })
+    const answer = { answers: [{ id: 'choice', selected: ['B'] }] }
+    const waiting = questionContext.waterfall('user-questions/request', request, () => Promise.reject(noProvider))
+      .then(value => ({ value }), error => ({ error }))
+
+    session.request('question-pending', 'nodeQuestions/pending', { sessionId: 'remote-session-1' })
+    const pending = await coordinator.result('question-pending')
+    expect(pending.result).toEqual({
+      ok: true,
+      value: { requests: [{ requestId: expect.any(String), sessionId: 'remote-session-1', questions: request.questions }] },
+    })
+    const requestId = (pending.result as { ok: true; value: { requests: { requestId: string }[] } }).value.requests[0]!.requestId
+
+    session.request('question-other-session', 'nodeQuestions/pending', { sessionId: 'another-session' })
+    expect((await coordinator.result('question-other-session')).result).toEqual({ ok: true, value: { requests: [] } })
+
+    session.request('question-invalid-answer', 'nodeQuestions/answer', {
+      sessionId: 'remote-session-1', requestId, answer: { answers: [{ id: 'wrong', selected: ['B'] }] },
+    })
+    expect((await coordinator.result('question-invalid-answer')).result)
+      .toMatchObject({ ok: false, error: { code: 'nodeQuestions/invalid-answer' } })
+
+    session.request('question-wrong-session', 'nodeQuestions/answer', {
+      sessionId: 'another-session', requestId, answer,
+    })
+    const refused = await coordinator.result('question-wrong-session')
+    expect(refused.result).toMatchObject({ ok: false, error: { code: 'nodeQuestions/not-found' } })
+
+    session.request('question-answer', 'nodeQuestions/answer', { sessionId: 'remote-session-1', requestId, answer })
+    expect((await coordinator.result('question-answer')).result).toMatchObject({ ok: true, value: { accepted: true } })
+    await expect(waiting).resolves.toEqual({ value: answer })
+    session.request('question-pending-empty', 'nodeQuestions/pending', { sessionId: 'remote-session-1' })
+    expect((await coordinator.result('question-pending-empty')).result).toEqual({ ok: true, value: { requests: [] } })
+    session.request('question-answer-stale', 'nodeQuestions/answer', { sessionId: 'remote-session-1', requestId, answer })
+    expect((await coordinator.result('question-answer-stale')).result)
+      .toMatchObject({ ok: false, error: { code: 'nodeQuestions/not-found' } })
+  }, 20_000)
+
+  it('keeps an existing local question answerer ahead of the remote bridge', async () => {
+    const session = await connectNode()
+    const questionContext = root as unknown as {
+      waterfall(name: string, request: unknown, next: () => Promise<unknown>): Promise<unknown>
+    }
+    const answer = { answers: [{ id: 'local-choice', selected: ['local'] }] }
+
+    await expect(questionContext.waterfall('user-questions/request', {
+      agent: { id: 'local-session' },
+      questions: [{ id: 'local-choice', question: '由本地处理' }],
+    }, () => Promise.resolve(answer))).resolves.toEqual(answer)
+    session.request('local-question-pending', 'nodeQuestions/pending', { sessionId: 'local-session' })
+    expect((await coordinator.result('local-question-pending')).result).toEqual({ ok: true, value: { requests: [] } })
+  }, 20_000)
+
+  it('cancels a pending question through the Remote and clears it once', async () => {
+    const session = await connectNode()
+    const questionContext = root as unknown as {
+      waterfall(name: string, request: unknown, next: () => Promise<unknown>): Promise<unknown>
+    }
+    const noProvider = Object.assign(new Error('no local answerer'), { name: 'UserQuestionError', code: 'NO_PROVIDER' })
+    const waiting = questionContext.waterfall('user-questions/request', {
+      agent: { id: 'cancel-session' },
+      questions: [{ id: 'q', question: '继续吗？' }],
+    }, () => Promise.reject(noProvider)).then(value => ({ value }), error => ({ error }))
+    session.request('cancel-pending', 'nodeQuestions/pending', { sessionId: 'cancel-session' })
+    const pending = await coordinator.result('cancel-pending')
+    expect(pending.result).toMatchObject({ ok: true, value: { requests: [{ sessionId: 'cancel-session' }] } })
+    const requestId = (pending.result as { ok: true; value: { requests: { requestId: string }[] } }).value.requests[0]!.requestId
+
+    session.request('cancel-question', 'nodeQuestions/cancel', { sessionId: 'cancel-session', requestId })
+    expect((await coordinator.result('cancel-question')).result).toMatchObject({ ok: true, value: { accepted: true } })
+    await expect(waiting).resolves.toMatchObject({ error: { name: 'UserQuestionError', code: 'ASK_CANCELLED' } })
+
+    session.request('cancel-pending-empty', 'nodeQuestions/pending', { sessionId: 'cancel-session' })
+    expect((await coordinator.result('cancel-pending-empty')).result).toEqual({ ok: true, value: { requests: [] } })
+  }, 20_000)
+
+  it('rejects a pending question and removes it when the agent aborts', async () => {
+    const session = await connectNode()
+    const questionContext = root as unknown as {
+      waterfall(name: string, request: unknown, next: () => Promise<unknown>): Promise<unknown>
+    }
+    const controller = new AbortController()
+    const noProvider = Object.assign(new Error('no local answerer'), { name: 'UserQuestionError', code: 'NO_PROVIDER' })
+    const waiting = questionContext.waterfall('user-questions/request', {
+      agent: { id: 'abort-session' },
+      questions: [{ id: 'q', question: '继续吗？' }],
+      signal: controller.signal,
+    }, () => Promise.reject(noProvider)).then(value => ({ value }), error => ({ error }))
+    session.request('abort-pending', 'nodeQuestions/pending', { sessionId: 'abort-session' })
+    const pending = await coordinator.result('abort-pending')
+    expect(pending.result).toMatchObject({ ok: true, value: { requests: [{ sessionId: 'abort-session' }] } })
+
+    controller.abort()
+    await expect(waiting).resolves.toMatchObject({ error: { name: 'UserQuestionError', code: 'ASK_ABORTED' } })
+    session.request('abort-pending-empty', 'nodeQuestions/pending', { sessionId: 'abort-session' })
+    expect((await coordinator.result('abort-pending-empty')).result).toEqual({ ok: true, value: { requests: [] } })
+  }, 20_000)
+
+  it('settles and removes pending questions when the node plugin is disposed', async () => {
+    const session = await connectNode()
+    const questionContext = root as unknown as {
+      waterfall(name: string, request: unknown, next: () => Promise<unknown>): Promise<unknown>
+    }
+    const noProvider = Object.assign(new Error('no local answerer'), { name: 'UserQuestionError', code: 'NO_PROVIDER' })
+    const waiting = questionContext.waterfall('user-questions/request', {
+      agent: { id: 'dispose-session' },
+      questions: [{ id: 'q', question: '继续吗？' }],
+    }, () => Promise.reject(noProvider)).then(value => ({ value }), error => ({ error }))
+    session.request('dispose-pending', 'nodeQuestions/pending', { sessionId: 'dispose-session' })
+    expect((await coordinator.result('dispose-pending')).result)
+      .toMatchObject({ ok: true, value: { requests: [{ sessionId: 'dispose-session' }] } })
+
+    await nodeFiber!.dispose()
+    nodeFiber = undefined
+    await expect(waiting).resolves.toMatchObject({ error: { name: 'UserQuestionError', code: 'ASK_ABORTED' } })
+  }, 20_000)
+
   it('reports its records through the harness logger, never through console alone', async () => {
     // A Cordis exporter is the public way to observe log records, and it is the
     // same seam DSH uses to write `logs/dsh-<date>.log`. A node that logged only
