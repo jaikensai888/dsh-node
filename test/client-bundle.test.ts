@@ -23,7 +23,7 @@
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ENTRY_ID, ENTRY_ORDER, FOOTER_ACTION_SLOT } from '../src/client/index.js'
 import { URL_PLACEHOLDER } from '../src/client/ConfigPanel.js'
 import { NODE_ENTRY_LABEL } from '../src/client/mapping.js'
@@ -275,9 +275,9 @@ describe('the built client bundle', () => {
 
   it('registers exactly one entry in the sidebar footer, above the diagram entry', () => {
     const loaded = loadBundle()
-    expect(loaded.injected).toEqual([FOOTER_ACTION_SLOT])
-    expect(loaded.effects).toBe(1)
-    expect(loaded.registrations).toHaveLength(1)
+    expect(loaded.injected).toEqual([FOOTER_ACTION_SLOT, 'settings.plugin.item'])
+    expect(loaded.effects).toBe(2)
+    expect(loaded.registrations.filter(entry => entry.options['name'] === FOOTER_ACTION_SLOT)).toHaveLength(1)
     const entry = loaded.registrations[0]
     expect(entry?.options).toMatchObject({
       name: FOOTER_ACTION_SLOT,
@@ -378,5 +378,90 @@ describe('the built client bundle', () => {
     expect(inputs.find(input => input.props?.['placeholder'] === URL_PLACEHOLDER)?.props?.['value']).toBe('')
     // The save button is present and labelled with what it does.
     expect(JSON.stringify(open)).toContain('保存并连接')
+  })
+})
+
+describe('the node settings card', () => {
+  afterEach(() => { vi.unstubAllGlobals() })
+
+  function openCard() {
+    const loaded = loadBundle()
+    const entry = loaded.registrations.find(item => item.options['key'] === 'dsh-node')
+    expect(entry?.options['name']).toBe('settings.plugin.item')
+    if (entry === undefined) throw new Error('the node settings card was not registered')
+    const tree = loaded.hooks.render(entry.component as (props: unknown) => Element, {})
+    const toggle = collect(tree, loaded.hooks).find(element => element.type === 'button')
+    expect(toggle?.props?.['aria-expanded']).toBe(false)
+    ;(toggle?.props?.['onClick'] as () => void)()
+    return loaded
+  }
+
+  const saved = {
+    coordinatorUrl: 'ws://127.0.0.1:39472/node', tokenSet: true,
+    nodeName: 'keep-name', role: 'keep-role', connectionIntent: 'paused',
+    nodeId: 'node-test', configFile: '/test/config.json',
+    sources: { coordinatorUrl: 'panel', token: 'panel' },
+  }
+
+  async function readConfig(loaded: Loaded): Promise<void> {
+    const reload = collect(loaded.hooks.latest(), loaded.hooks)
+      .find(element => element.type === 'button' && element.props?.['children'] === '重新读取')
+    ;(reload?.props?.['onClick'] as () => void)()
+    await vi.waitFor(() => {
+      const input = collect(loaded.hooks.latest(), loaded.hooks).find(element => element.type === 'input')
+      expect(input?.props?.['value']).toBe(saved.coordinatorUrl)
+    })
+  }
+
+  it('saves through the existing API, keeps blank tokens, and omits unrelated fields', async () => {
+    const requests: RequestInit[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(init)
+      return { ok: true, json: async () => ({ ok: true, value: saved }) }
+    }))
+    const loaded = openCard()
+    await readConfig(loaded)
+    const nodes = collect(loaded.hooks.latest(), loaded.hooks)
+    expect(nodes.filter(element => element.type === 'input')).toHaveLength(2)
+    expect(nodes.find(element => element.props?.['type'] === 'password')?.props?.['value']).toBe('')
+    const address = nodes.find(element => element.type === 'input')
+    ;(address?.props?.['onChange'] as (event: unknown) => void)({ target: { value: 'wss://example.test/node' } })
+    const save = collect(loaded.hooks.latest(), loaded.hooks)
+      .find(element => element.type === 'button' && element.props?.['children'] === '保存并连接')
+    ;(save?.props?.['onClick'] as () => void)()
+    await vi.waitFor(() => {
+      const post = requests.find(request => request.method === 'POST')
+      expect(JSON.parse(String(post?.body))).toEqual({ coordinatorUrl: 'wss://example.test/node' })
+    })
+  })
+
+  it('submits a new token and retains both drafts when the existing API refuses the save', async () => {
+    const requests: RequestInit[] = []
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      requests.push(init)
+      return {
+        ok: true,
+        json: async () => init.method === 'POST'
+          ? { ok: false, error: { code: 'node/config-write-failed', message: 'read-only store' } }
+          : { ok: true, value: saved },
+      }
+    }))
+    const loaded = openCard()
+    await readConfig(loaded)
+    const address = collect(loaded.hooks.latest(), loaded.hooks).find(element => element.type === 'input')
+    ;(address?.props?.['onChange'] as (event: unknown) => void)({ target: { value: 'wss://example.test/node' } })
+    const token = collect(loaded.hooks.latest(), loaded.hooks).find(element => element.props?.['type'] === 'password')
+    ;(token?.props?.['onChange'] as (event: unknown) => void)({ target: { value: 'replacement-node-token' } })
+    const save = collect(loaded.hooks.latest(), loaded.hooks)
+      .find(element => element.type === 'button' && element.props?.['children'] === '保存并连接')
+    ;(save?.props?.['onClick'] as () => void)()
+    await vi.waitFor(() => {
+      const nodes = collect(loaded.hooks.latest(), loaded.hooks)
+      expect(JSON.stringify(nodes)).toContain('配置文件写入失败')
+      expect(nodes.filter(element => element.type === 'input').map(element => element.props?.['value']))
+        .toEqual(['wss://example.test/node', 'replacement-node-token'])
+    })
+    const post = requests.find(request => request.method === 'POST')
+    expect(JSON.parse(String(post?.body))).toEqual({ coordinatorUrl: 'wss://example.test/node', token: 'replacement-node-token' })
   })
 })

@@ -99,7 +99,10 @@ function sourceLabel(source: 'panel' | 'profile' | 'environment' | 'none'): stri
  * The form.
  * @param props - `onSaved` fires after a successful save so the caller can re-poll.
  */
-export function ConfigPanel({ onSaved }: { onSaved: (config: NodeConfigSnapshot) => void }): JSX.Element {
+export function ConfigPanel({ onSaved, connectionOnly = false }: {
+  onSaved?: (config: NodeConfigSnapshot) => void
+  connectionOnly?: boolean
+}): JSX.Element {
   const [loaded, setLoaded] = useState<NodeConfigSnapshot | undefined>(undefined)
   const [loadError, setLoadError] = useState<string | undefined>(undefined)
   const [coordinatorUrl, setCoordinatorUrl] = useState('')
@@ -159,8 +162,8 @@ export function ConfigPanel({ onSaved }: { onSaved: (config: NodeConfigSnapshot)
 
     const draft: NodeConfigDraft = {
       coordinatorUrl: url,
-      nodeName: nodeName.trim(),
-      role: role.trim(),
+      // The Settings card edits only the connection, preserving name and role.
+      ...(connectionOnly ? {} : { nodeName: nodeName.trim(), role: role.trim() }),
       // Omitted when untouched, which is how "keep the stored token" is expressed.
       ...(typedToken === '' ? {} : { token: typedToken }),
     }
@@ -170,14 +173,14 @@ export function ConfigPanel({ onSaved }: { onSaved: (config: NodeConfigSnapshot)
         setBusy(false)
         adopt(config)
         setNotice('已保存，节点正在用新配置重连。')
-        onSaved(config)
+        onSaved?.(config)
       },
       (failure: unknown) => {
         setBusy(false)
         setError(failure instanceof Error ? failure.message : String(failure))
       },
     )
-  }, [adopt, coordinatorUrl, loaded, nodeName, onSaved, role, token])
+  }, [adopt, connectionOnly, coordinatorUrl, loaded, nodeName, onSaved, role, token])
 
   const clearToken = useCallback(() => {
     setError(undefined)
@@ -193,7 +196,7 @@ export function ConfigPanel({ onSaved }: { onSaved: (config: NodeConfigSnapshot)
         setBusy(false)
         adopt(config)
         setNotice('令牌已清除。')
-        onSaved(config)
+        onSaved?.(config)
       },
       (failure: unknown) => {
         setBusy(false)
@@ -265,7 +268,7 @@ export function ConfigPanel({ onSaved }: { onSaved: (config: NodeConfigSnapshot)
         </span>
       </Field>
 
-      <div style={{ display: 'flex', gap: 8 }}>
+      {connectionOnly ? null : <div style={{ display: 'flex', gap: 8 }}>
         <span style={{ flex: 1 }}>
           <Field label="名称" hint="可选">
             <input
@@ -288,9 +291,9 @@ export function ConfigPanel({ onSaved }: { onSaved: (config: NodeConfigSnapshot)
             />
           </Field>
         </span>
-      </div>
+      </div>}
 
-      {loaded === undefined ? null : (
+      {connectionOnly || loaded === undefined ? null : (
         <div style={{ fontSize: 11, color: 'var(--dsw-alias-label-tertiary, #8b949e)', marginBottom: 8, lineHeight: '16px' }}>
           <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
             <span style={{ flex: 1, wordBreak: 'break-all' }}>nodeId: {loaded.nodeId === '' ? '（尚未生成）' : loaded.nodeId}</span>

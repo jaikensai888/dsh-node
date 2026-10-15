@@ -1,5 +1,5 @@
 /**
- * Client-half plugin: one row in the sidebar footer.
+ * Client-half plugin: sidebar status row and plugin settings card.
  *
  * The registration mirrors the diagram entry that already lives in this slot,
  * including the two lessons its comments record:
@@ -19,6 +19,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import { NodeStatusEntry } from './NodeStatusEntry.js'
+import { NodeSettingsCard } from './NodeSettingsCard.js'
 
 /** The official sidebar's footer slot — the same one the diagram entry uses. */
 export const FOOTER_ACTION_SLOT = 'sidebar.footer.action'
@@ -47,9 +48,8 @@ interface SlotsService {
  *
  * Declaring `slots` here means this plugin applies only once the slot registry
  * exists — which is what makes the entry appear without racing the shell. It does
- * **not** depend on any other plugin's client half: this row shows the node's own
- * state and must survive a neighbour being broken (the failure mode that removed
- * the diagram entry from this very slot).
+ * **not** require a settings service: the card uses the node's existing config API,
+ * and each registration waits for its own slot declaration.
  */
 export const inject = ['slots'] as const
 
@@ -69,5 +69,10 @@ export function apply(ctx: Context): void {
       registrant: 'dsh-node',
     },
     (props: { wide?: boolean }) => <NodeStatusEntry wide={props?.wide !== false} />,
+  )))
+
+  ctx.effect(() => slots.inject('settings.plugin.item', () => slots.register(
+    { name: 'settings.plugin.item', key: 'dsh-node', registrant: 'dsh-node' },
+    NodeSettingsCard,
   )))
 }

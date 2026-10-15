@@ -1292,6 +1292,7 @@ describe('architecture guards (spec §1.1, §9.3, §15)', () => {
     // pass by scanning nothing — the mistake the recursive-readdir fix addressed.
     expect(client.map(source => source.name).sort()).toEqual([
       'client/ConfigPanel.tsx',
+      'client/NodeSettingsCard.tsx',
       'client/NodeStatusEntry.tsx',
       'client/config-source.ts',
       'client/index.tsx',

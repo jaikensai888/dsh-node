@@ -22,6 +22,7 @@ import { ADMIN_DESCRIPTORS, ADMIN_SERVICE_KEY, NodeAdminOwner } from './admin/se
 import { resolveNodeConfig, Config, type DshNodeRuntimeConfig, type NodeConfigResolution } from './config.js'
 import { mergeNodeConfig, resolveConfigFile, type ConnectionIntent, type StoredNodeConfig } from './config-file.js'
 import { NodeConfigService, loadStoredConfig } from './config-service.js'
+import { installNodeSettings } from './settings.js'
 import {
   Connector,
   type ConnectorOptions,
@@ -1312,6 +1313,7 @@ function readClientModules(ctx: NodeHostContext): NodeDiagnostics {
  * @param config - raw bootstrap configuration from `cordis.patch.yml`.
  */
 export function apply(ctx: NodeHostContext, config?: unknown): void {
+  installNodeSettings(ctx)
   const env = process.env
   const file = resolveConfigFile(env)
   const profileConfig = (): unknown => config
