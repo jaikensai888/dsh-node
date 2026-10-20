@@ -1,11 +1,13 @@
 import { useState } from 'react'
 import { ConfigPanel } from './ConfigPanel.js'
 
-/** Connection settings in DSH Settings → Plugins, using the existing node form. */
-export function NodeSettingsCard(): JSX.Element {
-  const [open, setOpen] = useState(false)
+/** Connection settings shared by current plugin pages and the legacy settings card. */
+export function NodeSettingsCard({ view }: { view?: 'summary' | 'page' } = {}): JSX.Element {
+  const [open, setOpen] = useState(view === 'page')
+  if (view === 'summary') return <span>本机节点与 dsh-coordinator 的连接。</span>
+  const Container = view === undefined ? 'li' : 'div'
   return (
-    <li style={{
+    <Container style={{
       listStyle: 'none', overflow: 'hidden', borderRadius: 12,
       border: '.5px solid var(--dsw-alias-border-l2, rgba(127,127,127,.24))',
       background: 'var(--dsw-alias-bg-layer-3, transparent)',
@@ -29,6 +31,6 @@ export function NodeSettingsCard(): JSX.Element {
         <span aria-hidden="true">{open ? '⌃' : '⌄'}</span>
       </button>
       {open ? <div style={{ padding: '0 16px 16px' }}><ConfigPanel connectionOnly /></div> : null}
-    </li>
+    </Container>
   )
 }

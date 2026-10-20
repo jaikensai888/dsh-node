@@ -275,8 +275,8 @@ describe('the built client bundle', () => {
 
   it('registers exactly one entry in the sidebar footer, above the diagram entry', () => {
     const loaded = loadBundle()
-    expect(loaded.injected).toEqual([FOOTER_ACTION_SLOT, 'settings.plugin.item'])
-    expect(loaded.effects).toBe(2)
+    expect(loaded.injected).toEqual([FOOTER_ACTION_SLOT, 'settings.plugin.item', 'plugins.item', 'plugins.bundle.config'])
+    expect(loaded.effects).toBe(4)
     expect(loaded.registrations.filter(entry => entry.options['name'] === FOOTER_ACTION_SLOT)).toHaveLength(1)
     const entry = loaded.registrations[0]
     expect(entry?.options).toMatchObject({
@@ -382,6 +382,28 @@ describe('the built client bundle', () => {
 })
 
 describe('the node settings card', () => {
+  it('shows a summary card without mounting the editable form', () => {
+    const loaded = loadBundle()
+    const entry = loaded.registrations.find(item => item.options['name'] === 'plugins.item')
+    expect(entry?.options).toMatchObject({ id: 'dsh-node', label: expect.any(Function) })
+    if (entry === undefined) throw new Error('no built-in node configuration card')
+    const nodes = collect(loaded.hooks.render(entry.component as (props: unknown) => Element, { view: 'summary' }), loaded.hooks)
+    expect(JSON.stringify(nodes)).toContain('dsh-coordinator')
+    expect(nodes.some(node => node.type === 'input' || node.type === 'button')).toBe(false)
+  })
+
+  it.each(['plugins.item', 'plugins.bundle.config'])('opens the connection form on %s pages', (slot) => {
+    const loaded = loadBundle()
+    const entry = loaded.registrations.find(item => item.options['name'] === slot)
+    if (entry === undefined) throw new Error('no node configuration page for ' + slot)
+    if (slot === 'plugins.bundle.config') expect(entry.options['key']).toBe('dsh-node')
+    const nodes = collect(loaded.hooks.render(entry.component as (props: unknown) => Element, { view: 'page' }), loaded.hooks)
+    expect(nodes.filter(node => node.type === 'input')).toHaveLength(2)
+    expect(JSON.stringify(nodes)).toContain('保存并连接')
+    expect(nodes.find(node => node.props?.['type'] === 'password')?.props?.['value']).toBe('')
+    expect(nodes.some(node => node.type === 'li')).toBe(false)
+  })
+
   afterEach(() => { vi.unstubAllGlobals() })
 
   function openCard() {

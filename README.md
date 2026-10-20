@@ -243,7 +243,7 @@ DSH 0.2.1-rc.2 的 Gateway 要求每个普通及流式调用携带调用方 `Pee
 
 ### 配置
 
-也可以进入 DSH「设置 → 插件 → 插件配置 → dsh-node」，展开卡片修改协调器地址与节点 Token。这里使用 `ws://` 或 `wss://` 地址（例如 `ws://127.0.0.1:39472/node`），填写的是 **node token**，不是 `dsh-master` 使用的 operator token。
+在 DSH 主界面左侧「插件 → 内置插件配置 → dsh-node」中，可修改协调器地址与节点 Token；「已安装插件 → dsh-node」详情页也显示同一表单。新版「设置 → 内置插件」只展示运行信息，旧版的设置卡片仍保留。保存后沿用现有配置 API 自动重连，配置仍存于 `<DSH_HOME>/storages/dsh-node/config.json`，不会迁移到普通设置文件。这里使用 `ws://` 或 `wss://` 地址（例如 `ws://127.0.0.1:39472/node`），填写的是 **node token**，不是 `dsh-master` 使用的 operator token。
 
 新卡片复用原来的配置接口与存储，侧边栏「节点」入口保留。Token 留空保留原值；设置卡片只提交连接字段，不覆盖节点名称、角色或手动断开状态。
 

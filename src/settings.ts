@@ -5,8 +5,8 @@ import z from 'schemastery'
 export function installNodeSettings(ctx: Context): void {
   ctx.inject(['settings'], (scoped) => {
     const settings = (scoped as Context & {
-      settings?: { register: (namespace: string, schema: unknown) => unknown }
+      settings?: { register?: (namespace: string, schema: unknown) => unknown }
     }).settings
-    settings?.register('dsh-node', z.object({}))
+    settings?.register?.('dsh-node', z.object({}))
   })
 }

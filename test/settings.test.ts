@@ -17,6 +17,14 @@ describe('node settings discovery', () => {
     expect(schema({})).toEqual({})
   })
 
+  it('does not call the removed register method on current DSH', () => {
+    expect(() => installNodeSettings({
+      inject: (_keys: string[], callback: (ctx: unknown) => void) => {
+        callback({ settings: { configure: () => undefined } })
+      },
+    } as unknown as Context)).not.toThrow()
+  })
+
   it('keeps settings discovery optional for headless deployments', () => {
     installNodeSettings({
       inject: (_keys: string[], callback: (ctx: unknown) => void) => { callback({}) },
@@ -29,6 +37,7 @@ describe('node settings discovery', () => {
     }
     expect(manifest.dsh.client.inject).toEqual(expect.arrayContaining([
       '@deepseek-ai/dsh-client-ui-settings', '@deepseek-ai/dsh-client-ui-settings-plugins',
+      '@deepseek-ai/dsh-client-ui-plugin-manager',
     ]))
   })
 })

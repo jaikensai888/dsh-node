@@ -38,7 +38,7 @@ export const ENTRY_ORDER = 50
 
 /** The slice of the slot registry this plugin uses. */
 interface SlotsService {
-  register(options: Record<string, unknown>, component: (props: { wide?: boolean }) => JSX.Element): () => void
+  register(options: Record<string, unknown>, component: (props: { wide?: boolean; view?: 'summary' | 'page' }) => JSX.Element): () => void
   /** Runs the callback per declaration lifetime of the slot; a no-op while undeclared. */
   inject(key: string, callback: () => () => void): () => void
 }
@@ -75,4 +75,12 @@ export function apply(ctx: Context): void {
     { name: 'settings.plugin.item', key: 'dsh-node', registrant: 'dsh-node' },
     NodeSettingsCard,
   )))
+
+  // Current DSH separates configuration cards from installed-package details.
+  for (const registration of [
+    { name: 'plugins.item', id: 'dsh-node', label: () => 'dsh-node' },
+    { name: 'plugins.bundle.config', key: 'dsh-node' },
+  ]) {
+    ctx.effect(() => slots.inject(registration.name, () => slots.register(registration, NodeSettingsCard)))
+  }
 }
