@@ -1,5 +1,9 @@
 # GROUND-TRUTH — dsh-node 的施工前事实基线与踩坑清单
 
+> **2026-10-20 当前兼容基线：DSH 0.2.1-rc.2。** Gateway 的 `invoke` / `stream` 请求现在必须带 `peer`；省略时会在 `assertPeerLive()` 读取 `peer.signal` 报错。dsh-node 通过官方 `connection.createPeer({ principal: { kind: 'owner' }, interactions: 'none' })` 为已认证的协调器调用提供上下文，保留既有节点能力检查；断线释放，后续连接重新创建。旧版本没有工厂时沿用旧请求方式。
+>
+> 验证：481 项测试通过；使用安装包与隔离 profile 经真实出站 WebSocket 验证 `session/list`、`pluginInventory/list`、`workspace/follow` 基线和流取消。未向用户正在使用的协调器发送请求。下面标注 2026-09 的版本信息为历史基线。
+
 > 本文是 `dsh-node` 的**已核实事实**清单。每条都在本机读过源码或跑过命令核对。
 > 目的：让新会话**不必重新调研**，也**不要重新踩坑**。
 >

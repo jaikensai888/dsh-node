@@ -120,6 +120,12 @@ export const CAPABILITY_FAILURE_CODES: ReadonlySet<string> = new Set([
   'gateway/definition-unavailable',
 ])
 
+/** The official calling Peer, reduced to the lifetime this transport owns. */
+interface GatewayPeerLike {
+  readonly signal: AbortSignal
+  dispose(): Promise<void>
+}
+
 /** The slice of `ctx.typertGateway` this plugin uses. Structural on purpose. */
 export interface TypertGatewayLike {
   invoke(request: {
@@ -127,6 +133,7 @@ export interface TypertGatewayLike {
     readonly method: string
     readonly args: Readonly<Record<string, unknown>>
     readonly signal?: AbortSignal
+    readonly peer?: GatewayPeerLike | undefined
   }): Promise<unknown>
   /** Opens one stream Remote; the descriptor's mode must be `stream`. */
   stream(request: {
@@ -134,6 +141,7 @@ export interface TypertGatewayLike {
     readonly method: string
     readonly args: Readonly<Record<string, unknown>>
     readonly signal?: AbortSignal
+    readonly peer?: GatewayPeerLike | undefined
   }): Promise<AsyncIterable<unknown>>
   readonly wireStream: {
     failure(error: unknown): { readonly code: string; readonly message: string; readonly details: object }
@@ -348,6 +356,7 @@ export class DshNodeHost implements ConnectorDelegate {
   private capabilityIndex: CapabilityIndex | undefined
   private capabilitiesStale = true
   private running = false
+  private callingPeer: GatewayPeerLike | undefined
   private connectionIntent: ConnectionIntent
   private lastState: DshNodeStatus['state']
 
@@ -738,6 +747,8 @@ export class DshNodeHost implements ConnectorDelegate {
    * explicit failure and decides for itself (spec §1.1 #8).
    */
   onDisconnected(error: NodeError): void {
+    const peer = this.callingPeer
+    this.callingPeer = undefined
     const failed = this.requests.failAll(error)
     // Streams have no socket left to report on, so they are released locally and
     // never resumed: v1 has no continuation, and replaying a partially consumed
@@ -746,6 +757,11 @@ export class DshNodeHost implements ConnectorDelegate {
       { code: 'node/connection-lost', message: error.message, details: error.details },
       false,
     )
+    if (peer !== undefined) {
+      void peer.dispose().catch(() => {
+        this.logger.warn('dsh-node/peer-dispose-failed', { nodeId: this.nodeId })
+      })
+    }
     if (failed.length > 0 || ended.length > 0) {
       this.logger.warn('dsh-node/disconnected', {
         nodeId: this.nodeId,
@@ -817,7 +833,7 @@ export class DshNodeHost implements ConnectorDelegate {
           details: {},
         }).then(failure => ({ ok: false as const, failure }))
         : gateway
-          .invoke({ namespace: parsed.namespace, method: parsed.method, args, signal: pending.signal })
+          .invoke({ namespace: parsed.namespace, method: parsed.method, args, signal: pending.signal, peer: this.gatewayPeer() })
           .then(
             value => ({ ok: true as const, value }),
             (error: unknown) => ({ ok: false as const, failure: this.failureOf(gateway, error, frame.endpoint) }),
@@ -946,6 +962,7 @@ export class DshNodeHost implements ConnectorDelegate {
         method: parsed.method,
         args,
         signal: entry.signal,
+        peer: this.gatewayPeer(),
       })
     } catch (error) {
       // Opening failed: no `stream.ready` was sent, so this is the stream's one
@@ -1144,6 +1161,16 @@ export class DshNodeHost implements ConnectorDelegate {
         if (state === 'ready') this.currentError = undefined
       },
     }
+  }
+
+  /** New Gateways require a calling Peer; older hosts have no Peer factory. */
+  private gatewayPeer(): GatewayPeerLike | undefined {
+    if (this.callingPeer !== undefined) return this.callingPeer
+    const connection = this.ctx.get('connection', false) as unknown as {
+      createPeer?(options: { principal: { kind: 'owner' }; interactions: 'none' }): GatewayPeerLike
+    } | undefined
+    this.callingPeer = connection?.createPeer?.({ principal: { kind: 'owner' }, interactions: 'none' })
+    return this.callingPeer
   }
 
   private gateway(): TypertGatewayLike | undefined {

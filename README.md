@@ -234,6 +234,11 @@ dsh-node/
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- 使用 -->
+## 新版 DSH Gateway 兼容性
+
+DSH 0.2.1-rc.2 的 Gateway 要求每个普通及流式调用携带调用方 `Peer`。本插件通过官方 `connection.createPeer()` 创建连接期间复用的上下文，在断线时释放，防止查看远程工作区时出现 `gateway/internal: Cannot read properties of undefined (reading 'signal')`。没有该工厂的旧版 DSH 保持原调用方式。
+
+更新本插件并构建后，需要让**运行 dsh-node 的 DSH 实例**重新加载插件；仅重启 dsh-master 不会更新远端节点。地址、token 与节点身份无需重建。
 ## 使用
 
 ### 配置
