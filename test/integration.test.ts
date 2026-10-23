@@ -594,6 +594,49 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
       .toMatchObject({ ok: false, error: { code: 'nodeQuestions/not-found' } })
   }, 20_000)
 
+  it('routes a question through the remote bridge while its session is being viewed', async () => {
+    const session = await connectNode()
+    const questionContext = root as unknown as {
+      waterfall(name: string, request: unknown, next: () => Promise<unknown>): Promise<unknown>
+    }
+    const sessionId = 'viewed-session'
+    session.request('view-session', 'nodeQuestions/pending', { sessionId })
+    expect((await coordinator.result('view-session')).result).toEqual({ ok: true, value: { requests: [] } })
+
+    let localAnswererCalled = false
+    let releaseLocal: (value: unknown) => void = () => undefined
+    const localAnswer = new Promise<unknown>((resolve) => { releaseLocal = resolve })
+    const answer = { answers: [{ id: 'choice', selected: ['remote'] }] }
+    const waiting = questionContext.waterfall('user-questions/request', {
+      agent: { id: sessionId },
+      questions: [{ id: 'choice', question: '选择方案', options: [{ label: 'remote' }] }],
+    }, () => {
+      localAnswererCalled = true
+      return localAnswer
+    })
+
+    try {
+      session.request('viewed-question-pending', 'nodeQuestions/pending', { sessionId })
+      const pending = await coordinator.result('viewed-question-pending')
+      expect(pending.result).toMatchObject({
+        ok: true,
+        value: { requests: [{ sessionId, questions: [{ id: 'choice' }] }] },
+      })
+      expect(localAnswererCalled).toBe(false)
+
+      const requestId = (pending.result as { ok: true; value: { requests: { requestId: string }[] } })
+        .value.requests[0]!.requestId
+      session.request('viewed-question-answer', 'nodeQuestions/answer', { sessionId, requestId, answer })
+      expect((await coordinator.result('viewed-question-answer')).result).toMatchObject({
+        ok: true,
+        value: { accepted: true },
+      })
+      await expect(waiting).resolves.toEqual(answer)
+    } finally {
+      releaseLocal({ answers: [] })
+    }
+  }, 20_000)
+
   it('keeps an existing local question answerer ahead of the remote bridge', async () => {
     const session = await connectNode()
     const questionContext = root as unknown as {

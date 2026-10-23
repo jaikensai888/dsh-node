@@ -336,7 +336,7 @@ curl http://127.0.0.1:<port>/dsh-node/api/config
 
 默认允许的根是**活跃 session 的工作目录**（没有 session 就一律拒绝，不会退回整个磁盘）。
 
-`nodeQuestions/*` 把远程 Agent 的 `ask_user_question` 接回原始等待调用：本地 answerer 先处理，只有没有可用 answerer 时才将问题按 session 暴露给 master。问题只保存在内存中；回答保留 question ID、选项和自定义文本，取消/Agent 中止/插件卸载会结算并清理等待项。升级 dsh-node 后，远程节点才会在 `ready.capabilities` 中公布这三个接口：
+`nodeQuestions/*` 把远程 Agent 的 `ask_user_question` 接回原始等待调用：dsh-master 正在查看的 session 由远程表单优先接管；其他 session 保留本地 answerer，只有收到 `NO_PROVIDER` 才回退到远程桥接。master 通过 `pending` 轮询续租，停止查看 15 秒后自动恢复本地 answerer 优先。问题只保存在内存中；回答保留 question ID、选项和自定义文本，取消/Agent 中止/插件卸载会结算并清理等待项。升级 dsh-node 后，远程节点才会在 `ready.capabilities` 中公布这三个接口：
 
 | 端点 | 作用 |
 | --- | --- |
@@ -502,6 +502,46 @@ dsh plugin --profile desktop remove dsh-node
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- 致谢 -->
+## 用量采集（2026-10-23 新增）
+
+插件在 `llm/stream` waterfall 上安装**一个只读观察器**，记录每一次实际执行的模型调用，
+写入本地 SQLite 队列，并通过三个 `nodeUsage/*` Remote 交给 Coordinator 拉取。
+
+覆盖范围：节点本地调用、Coordinator 发起的调用、重试（每次重试是新的 attempt）、
+压缩、标题生成、原生子代理调用。判定依据是已安装 DSH runtime 的实现：
+`LlmRuntime.streamWithRegistration()` 把 `llm/stream` 作为 waterfall 包住每个 adapter stream，
+`GenerateOptions` 带 `provider`/`model`/`sessionId`/`purpose`。
+
+队列与配置：
+
+```yaml
+- name: dsh-node
+  config:
+    usage:
+      enabled: true                       # 默认 true；false 时仍上报 disabled 状态
+      databaseFile: ''                    # 空 = <DSH_HOME>/storages/dsh-node/usage.sqlite
+      maxBytes: 268435456                 # 256 MiB 高水位（DB + WAL）
+```
+
+行为与边界：
+
+- 序列号从 1 单调递增；每次调用先落 `running`，usage 到达与终态各写一条修订。
+- `running`、`completed`、`failed`、`cancelled`、`process_interrupted` 分开计数；
+  `finish.reason.kind=length` 属正常完成，不是失败。
+- 缺少 usage 记 `usageReported=false`，不写 0；缓存桶缺失同理。
+- Coordinator 拉取后按事务入库再 ACK；ACK 丢失时重放不会重复计数，序号分叉会停止同步。
+- 已 ACK 事件保留 24 小时安全窗口；未 ACK 数据永不自动删除。
+- 队列绑定 nodeId：换 nodeId 复用旧库会被拒绝；重置时停插件、移走队列，生成新 collectorId。
+- 宿主没有 `node:sqlite`（Node < 22.5）时，采集以 `nodeUsage/storage-unavailable` 报告不可用，
+  节点连接与业务调用不受影响。
+- 本插件不使用 `better-sqlite3`：其加载需要架构守卫禁止的动态模块通道；驱动兼容性结论见
+  Coordinator 仓库的 `docs/usage-compatibility.md`。
+
+管理界面（Coordinator 侧）提供概览、节点详情、调用明细与覆盖/缺口提示；
+接口字段以 `dsh-coordinator/docs/specs/2026-10-23-node-usage-contracts.md` 为准。
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
 ## 致谢
 
 本项目的 README 结构改编自 [othneildrew/Best-README-Template](https://github.com/othneildrew/Best-README-Template)。

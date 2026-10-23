@@ -32,7 +32,7 @@ import {
 } from './connector.js'
 import { NodeError, RemoteCodeError, nodeFailure, type NodeFailure } from './errors.js'
 import { capabilitySurfaceHash, parseEndpoint, parseRequestArgs } from './frame-codec.js'
-import { loadOrCreateIdentity, resolveIdentityFile, type NodeIdentity } from './identity.js'
+import { loadOrCreateIdentity, resolveIdentityFile, resolveUsageDatabaseFile, type NodeIdentity } from './identity.js'
 import {
   NodeQuestionBridge,
   QUESTIONS_DESCRIPTORS,
@@ -63,6 +63,9 @@ import {
 import { RequestManager, type PendingRequest } from './request-manager.js'
 import { StreamManager, type StreamEvent, type StreamManagerTimers } from './stream-manager.js'
 import { cordisLogSink, createNodeLogger, statusSnapshot, type NodeLogger, type NodeLogSink } from './status.js'
+import { installUsageCollector, type UsageCollector } from './usage/collector.js'
+import { NodeUsageOwner, USAGE_DESCRIPTORS, USAGE_SERVICE_KEY } from './usage/service.js'
+import { NodeUsageStore } from './usage/store.js'
 
 export { Config, resolveNodeConfig } from './config.js'
 export type { DshNodeRuntimeConfig, NodeConfigResolution } from './config.js'
@@ -85,6 +88,10 @@ export {
 export type { ConfigFileRead, ConnectionIntent, StoredNodeConfig } from './config-file.js'
 export { foldSubmission, loadStoredConfig, NodeConfigService, readSubmission } from './config-service.js'
 export { isLoopbackHostname, isTrustedNodeRequest } from './net/trust-fence.js'
+export { installUsageCollector, stateOf as attemptStateOf } from './usage/collector.js'
+export { NodeUsageOwner, USAGE_DESCRIPTORS, USAGE_NAMESPACE, USAGE_SERVICE_KEY } from './usage/service.js'
+export { NodeUsageStore } from './usage/store.js'
+export * from './usage/types.js'
 export * from './protocol.js'
 
 /** Host-half plugin name. Must equal the package name. */
@@ -1360,6 +1367,87 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
   let disposed = false
   const questions = new NodeQuestionBridge()
 
+  /*
+    Usage state is plugin-scoped, not host-scoped.
+
+    A configuration save rebuilds `DshNodeHost` (the transport host), and the
+    observer must survive that: re-installing it would double-count every call made
+    after the rebuild, and tearing it down for the rebuild would lose every call made
+    during it. So the queue, the collector, and the Remote owner are created once,
+    outside `bootNow`.
+  */
+  let usageStore: NodeUsageStore | undefined
+  let usageOwner: NodeUsageOwner | undefined
+  let usageCollector: UsageCollector | undefined
+  let collectorInstalled = false
+  let usageUnsupported: string | undefined
+  let usageDisposer: (() => Promise<void>) | undefined
+
+  const issueSink = (issue: { code: string; message: string }): void => {
+    logger.warn('dsh-node/usage-issue', { code: issue.code, message: issue.message })
+  }
+
+  /** Install the observer once, when both the queue and the LLM service exist. */
+  const installCollector = (scoped: Context): void => {
+    if (collectorInstalled || disposed) return
+    const llm = (scoped as unknown as { get(key: string, strict?: boolean): unknown }).get('llm', false)
+    if (llm === undefined || usageStore === undefined) return
+    collectorInstalled = true
+    usageCollector = installUsageCollector(scoped, usageStore, { onIssue: issueSink })
+    usageDisposer = () => usageCollector?.dispose() ?? Promise.resolve()
+    logger.info('dsh-node/usage-collector-installed', { queue: usageStore.file, driver: usageStore.driver })
+  }
+
+  // A plugin composed without `llm` still runs; it simply reports `unsupported`
+  // instead of pretending it has nothing to collect.
+  ctx.inject(['llm'], (scoped: Context) => { installCollector(scoped) })
+
+  /**
+   * Open the queue once and bind it to this node's identity.
+   *
+   * Opening is attempted on the first boot, when the node id is known. A later save
+   * that changes the node id does not get to reuse the queue: the old records belong
+   * to the old identity, and silently attributing them to a new one is exactly the
+   * mistake the contract forbids.
+   */
+  const ensureUsage = (nodeId: string, config: DshNodeRuntimeConfig): void => {
+    if (usageStore === undefined) {
+      try {
+        const file = resolveUsageDatabaseFile(env, config.usage.databaseFile)
+        usageStore = NodeUsageStore.open({ file, nodeId, maxBytes: config.usage.maxBytes })
+        logger.info('dsh-node/usage-queue-open', {
+          file: usageStore.file,
+          driver: usageStore.driver,
+          collectorId: usageStore.collectorId,
+        })
+      } catch (error) {
+        usageUnsupported = (error as Error).message
+        logger.warn('dsh-node/usage-unavailable', { message: usageUnsupported })
+        return
+      }
+    }
+    if (usageStore.nodeId !== nodeId) {
+      usageUnsupported = 'node-mismatch'
+      logger.warn('dsh-node/usage-node-mismatch', {
+        queueNodeId: usageStore.nodeId,
+        nodeId,
+        hint: 'the usage queue belongs to a different node identity; give this node its own usage.databaseFile or reset the queue',
+      })
+      return
+    }
+    if (!config.usage.enabled) {
+      // Registered even when disabled: the Coordinator must be able to tell "off"
+      // from "not there", and an operator who turns it back on keeps the same queue.
+      usageOwner = new NodeUsageOwner({ store: usageStore, enabled: false })
+      return
+    }
+    usageOwner = new NodeUsageOwner({
+      store: usageStore,
+      ...(usageUnsupported === undefined ? {} : { unsupportedReason: usageUnsupported }),
+    })
+    installCollector(ctx)
+  }
+
   ctx.effect(() => {
     const dispose = installQuestionFallback(ctx, questions)
     return () => {
@@ -1384,9 +1472,12 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
       bootstrap: mergeNodeConfig(profileConfig(), stored),
       ...(stored?.connectionIntent === undefined ? {} : { connectionIntent: stored.connectionIntent }),
     })
+    // The queue is opened and bound before the surface is registered, so the
+    // `nodeUsage/*` endpoints either exist and work or do not exist at all.
+    ensureUsage(host.nodeId, host.config)
     // Mounted before the connector starts, so the very first `ready` frame already
-    // advertises the node's built-in management and question endpoints.
-    const disposeAdmin = installAdminSurface(ctx, host, questions)
+    // advertises the node's built-in management and usage endpoints.
+    const disposeAdmin = installAdminSurface(ctx, host, questions, usageOwner)
     const disposeService = ctx.provide('dshNode', host)
     current = host
     adminDisposer = disposeAdmin
@@ -1465,6 +1556,15 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
       disposed = true
       await booting.catch(() => undefined)
       await enqueue(() => shutdownNow('plugin-disposed'))
+      /*
+        The observer goes before the queue closes, and the queue closes before the
+        process can lose it: a chunk arriving after `close()` would be recorded
+        against a closed handle, and the failure would look like a collector bug
+        rather than a shutdown.
+      */
+      await usageDisposer?.().catch(() => undefined)
+      usageStore?.close()
+      usageStore = undefined
     }
   }, 'dsh-node: outbound WebSocket node')
 
@@ -1541,6 +1641,7 @@ function installAdminSurface(
   ctx: NodeHostContext,
   host: DshNodeHost,
   questions: NodeQuestionBridge,
+  usage: NodeUsageOwner | undefined,
 ): () => Promise<void> {
   const config = host.config
   const owner = new NodeAdminOwner({
@@ -1564,17 +1665,25 @@ function installAdminSurface(
 
   const disposeService = ctx.provide(ADMIN_SERVICE_KEY, owner)
   const disposeQuestionsService = ctx.provide(QUESTIONS_SERVICE_KEY, questions)
+  // The usage owner lives under its own key so the Gateway resolves `nodeUsage/*`
+  // against the queue instead of the admin surface.
+  const disposeUsageService = usage === undefined ? undefined : ctx.provide(USAGE_SERVICE_KEY, usage)
   const disposeInvocations = typertHostRegistration(ctx)?.register({
     package: 'dsh-node',
     face: 'host',
     schemas: [],
     model: { services: [], events: [], objects: [] },
-    invocations: [...ADMIN_DESCRIPTORS, ...QUESTIONS_DESCRIPTORS],
+    invocations: [
+      ...ADMIN_DESCRIPTORS,
+      ...QUESTIONS_DESCRIPTORS,
+      ...(usage === undefined ? [] : USAGE_DESCRIPTORS),
+    ],
   })
 
   return async () => {
     disposeService()
     disposeQuestionsService()
+    disposeUsageService?.()
     // `undefined` when this DSH exposes no Host registration entry point, in which
     // case there is nothing to withdraw.
     await disposeInvocations?.()
@@ -1595,6 +1704,9 @@ function installQuestionFallback(ctx: NodeHostContext, bridge: NodeQuestionBridg
   }
   const events = ctx as unknown as QuestionWaterfallContext
   return events.on('user-questions/request', async (request, next) => {
+    if (bridge.isSessionViewed(request.agent?.id)) {
+      return bridge.ask(request as Parameters<NodeQuestionBridge['ask']>[0])
+    }
     try {
       return await next()
     } catch (error) {

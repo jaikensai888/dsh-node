@@ -87,6 +87,25 @@ export function resolveIdentityFile(env: NodeJS.ProcessEnv = process.env, overri
   return override
 }
 
+/** File name of the durable usage queue inside this node's data directory. */
+export const USAGE_DATABASE_FILE_NAME = 'usage.sqlite'
+
+/**
+ * Resolve the usage queue location.
+ *
+ * Beside the identity, under `<dshHome>/storages/dsh-node`, because the queue is
+ * bound to the node identity: moving it elsewhere without moving the identity would
+ * create a queue that refuses to open (and that refusal is deliberate — it is what
+ * keeps one node's usage from being attributed to another).
+ * @param env - environment mapping.
+ * @param override - explicit absolute path from `usage.databaseFile`.
+ * @returns the absolute queue path.
+ */
+export function resolveUsageDatabaseFile(env: NodeJS.ProcessEnv = process.env, override?: string): string {
+  if (override !== undefined && override !== '') return override
+  return join(resolveIdentityDir(env), USAGE_DATABASE_FILE_NAME)
+}
+
 /**
  * Mint a new node id.
  *

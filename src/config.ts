@@ -71,6 +71,8 @@ export const BOUNDS = {
   maxBufferedBytesPerStream: { min: 1_024, max: 268_435_456 },
   sendStallTimeoutMs: { min: 10, max: 600_000 },
   auditCapacity: { min: 1, max: 10_000 },
+  /** The usage queue ceiling: large enough to survive a long outage, small enough to notice. */
+  usageMaxBytes: { min: 1_048_576, max: 268_435_456 },
 } as const
 
 /** Default values for every tunable, also used when a field is absent. */
@@ -110,6 +112,19 @@ export const DEFAULT_NODE_CONFIG = {
   adminSkillsEnabled: true,
   /** How many `nodeAdmin` operations the audit ring retains. */
   auditCapacity: 256,
+  /**
+   * Usage collection.
+   *
+   * On by default: a node that has to be told to record model calls is a node
+   * whose first week of data is missing. `databaseFile` is empty, which means
+   * "beside this node's identity under the DSH home"; an explicit path is for a
+   * deployment that keeps its data elsewhere.
+   */
+  usage: {
+    enabled: true,
+    databaseFile: '',
+    maxBytes: 268_435_456,
+  },
 } as const
 
 /**
@@ -148,6 +163,14 @@ export const Config = z.object({
   adminFilesystemEnabled: z.boolean().default(DEFAULT_NODE_CONFIG.adminFilesystemEnabled),
   adminSkillsEnabled: z.boolean().default(DEFAULT_NODE_CONFIG.adminSkillsEnabled),
   auditCapacity: z.number().default(DEFAULT_NODE_CONFIG.auditCapacity),
+  /** Usage collection; `databaseFile` defaults to the DSH home. */
+  usage: z
+    .object({
+      enabled: z.boolean().default(DEFAULT_NODE_CONFIG.usage.enabled),
+      databaseFile: z.string().default(''),
+      maxBytes: z.number().default(DEFAULT_NODE_CONFIG.usage.maxBytes),
+    })
+    .default({ ...DEFAULT_NODE_CONFIG.usage }),
   /** Override the identity file; must be an absolute path when set. */
   identityFile: z.string().default(''),
 })
@@ -192,6 +215,14 @@ export interface DshNodeRuntimeConfig {
   readonly adminSkillsEnabled: boolean
   /** Audit ring capacity. */
   readonly auditCapacity: number
+  /** Usage collection settings. */
+  readonly usage: {
+    readonly enabled: boolean
+    /** An absolute override; absent means "beside the node identity". */
+    readonly databaseFile?: string
+    /** Ceiling for the queue database plus its WAL. */
+    readonly maxBytes: number
+  }
   readonly identityFile?: string
 }
 
@@ -258,6 +289,7 @@ export function resolveNodeConfig(raw: unknown, env: NodeJS.ProcessEnv = process
     adminFilesystemEnabled: resolveBoolean(record['adminFilesystemEnabled'], DEFAULT_NODE_CONFIG.adminFilesystemEnabled),
     adminSkillsEnabled: resolveBoolean(record['adminSkillsEnabled'], DEFAULT_NODE_CONFIG.adminSkillsEnabled),
     auditCapacity: resolveNumber(record['auditCapacity'], DEFAULT_NODE_CONFIG.auditCapacity, 'auditCapacity', BOUNDS.auditCapacity, errors),
+    usage: resolveUsage(record['usage'], errors),
     ...(coordinatorUrl === undefined ? {} : { coordinatorUrl }),
     ...(token === undefined ? {} : { token }),
     ...(optionalString(record['nodeId']) === undefined ? {} : { nodeId: optionalString(record['nodeId']) as string }),
@@ -362,9 +394,34 @@ function resolveToken(record: Record<string, unknown>, env: NodeJS.ProcessEnv): 
   return optionalString(auth['token']) ?? optionalString(env[TOKEN_ENV])
 }
 
+/**
+ * Resolve the `usage` block.
+ *
+ * An unusable `databaseFile` is an error rather than a silent fallback: a
+ * deployment that asked for its queue in a specific place and got the default
+ * instead would look like it worked until someone went looking for the file.
+ */
+function resolveUsage(raw: unknown, errors: string[]): DshNodeRuntimeConfig['usage'] {
+  const record = isRecord(raw) ? raw : {}
+  const enabled = resolveBoolean(record['enabled'], DEFAULT_NODE_CONFIG.usage.enabled)
+  const configured = optionalString(record['databaseFile'])
+  let databaseFile: string | undefined
+  if (configured !== undefined) {
+    if (isAbsolute(configured)) databaseFile = configured
+    else errors.push('usage.databaseFile must be an absolute path')
+  }
+  const maxBytes = resolveNumber(
+    record['maxBytes'],
+    DEFAULT_NODE_CONFIG.usage.maxBytes,
+    'usage.maxBytes',
+    BOUNDS.usageMaxBytes,
+    errors,
+  )
+  return { enabled, maxBytes, ...(databaseFile === undefined ? {} : { databaseFile }) }
+}
+
 /** Resolve and validate an optional identity-file override. */
-function resolveIdentityFile(raw: unknown, env: NodeJS.ProcessEnv, errors: string[]): string | undefined {
-  const configured = optionalString(raw) ?? optionalString(env[IDENTITY_FILE_ENV])
+function resolveIdentityFile(raw: unknown, env: NodeJS.ProcessEnv, errors: string[]): string | undefined {  const configured = optionalString(raw) ?? optionalString(env[IDENTITY_FILE_ENV])
   if (configured === undefined) return undefined
   if (!isAbsolute(configured)) {
     errors.push('identityFile must be an absolute path')

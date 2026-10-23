@@ -5,6 +5,7 @@ import type { InvocationDescriptor } from '@deepseek-ai/dsh-typert-protocol'
 
 export const QUESTIONS_SERVICE_KEY = 'nodeQuestions'
 export const QUESTIONS_NAMESPACE = 'nodeQuestions'
+const SESSION_VIEW_LEASE_MS = 15_000
 
 export interface QuestionOption {
   readonly label: string
@@ -123,6 +124,7 @@ export class NodeQuestionBridge {
     })
 
   readonly #pending = new Map<string, PendingEntry>()
+  readonly #viewedSessions = new Map<string, number>()
   #disposed = false
 
   /** Ask the remote UI, resolving only when its structured answer arrives. */
@@ -164,11 +166,28 @@ export class NodeQuestionBridge {
   /** Return pending requests for exactly one session. */
   pending(sessionIdValue: unknown): { readonly requests: readonly PendingQuestionRequest[] } {
     const sessionId = requiredString(sessionIdValue, 'sessionId')
+    const now = Date.now()
+    for (const [viewedSessionId, expiresAt] of this.#viewedSessions) {
+      if (expiresAt <= now) this.#viewedSessions.delete(viewedSessionId)
+    }
+    this.#viewedSessions.set(sessionId, now + SESSION_VIEW_LEASE_MS)
     return {
       requests: [...this.#pending.values()]
         .filter(request => request.sessionId === sessionId)
         .map(({ requestId, sessionId: owner, questions }) => ({ requestId, sessionId: owner, questions })),
     }
+  }
+
+  /** Whether dsh-master has recently refreshed this session's question view. */
+  isSessionViewed(sessionIdValue: unknown): boolean {
+    if (typeof sessionIdValue !== 'string' || sessionIdValue.trim() === '') return false
+    const expiresAt = this.#viewedSessions.get(sessionIdValue)
+    if (expiresAt === undefined) return false
+    if (expiresAt <= Date.now()) {
+      this.#viewedSessions.delete(sessionIdValue)
+      return false
+    }
+    return true
   }
 
   /** Resolve one waiting request after validating its owner and complete answer set. */
@@ -191,6 +210,7 @@ export class NodeQuestionBridge {
   /** Reject all waiters when the owning DSH plugin is unloaded. */
   dispose(): void {
     this.#disposed = true
+    this.#viewedSessions.clear()
     for (const requestId of this.#pending.keys()) {
       this.#settle(requestId, entry => {
         entry.reject(questionFailure('ASK_ABORTED', 'the remote question bridge has been disposed'))
