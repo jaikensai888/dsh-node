@@ -23,6 +23,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { BuildInfo } from './build-info.js'
 import type { ConnectionIntent } from './config-file.js'
 import type { DshNodeStatus } from './protocol.js'
 import { isTrustedNodeRequest } from './net/trust-fence.js'
@@ -34,6 +35,14 @@ export const NODE_ROUTE_PREFIX = '/dsh-node'
 export interface NodeStatusView extends DshNodeStatus {
   /** Plugin version, so the UI can show a version skew instead of guessing. */
   readonly pluginVersion?: string
+  /**
+   * The build this process loaded, embedded at compile time.
+   *
+   * Present alongside `pluginVersion` so an operator can tell an installed file
+   * from the build actually running, including its commit and channel. Optional so
+   * an older host that does not send it stays readable by the same client.
+   */
+  readonly buildInfo?: BuildInfo
   /** The one mode this build supports (spec: a second level cannot be forged). */
   readonly mode?: string
   /** Milliseconds since the host was constructed. */

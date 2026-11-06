@@ -1,0 +1,188 @@
+# Publish a built plugin package for an explicit version tag.
+#
+# Normal pushes run CI only. This workflow runs only for `v*` tags, validates that
+# the tag equals `v<package.json version>`, requires a clean checkout, and only
+# then creates a *draft* Release, uploads both assets, verifies them, and publishes
+# the draft. A published Release is never replaced; a second push of the same tag
+# fails unless the release is still a draft for the same commit.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+concurrency:
+  # One publisher per tag, and never cancel a release mid-upload.
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22.x'
+  PNPM_VERSION: '11.8.0'
+  GH_TOKEN: ${{ github.token }}
+
+jobs:
+  publish:
+    name: verify, package, draft, verify assets, publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install from the locked dependency graph
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate tag against package.json, commit, and a clean tree
+        run: node tools/build-info.mjs --check-release --tag "$GITHUB_REF_NAME"
+
+      - name: Typecheck (app and release boundaries)
+        run: pnpm typecheck
+
+      - name: Build with release metadata embedded
+        env:
+          DSH_NODE_RELEASE: '1'
+          DSH_NODE_RELEASE_TAG: ${{ github.ref_name }}
+        run: pnpm build
+
+      # `client-bundle.test.ts` reads the built `lib/client.js`; build first on a
+      # clean checkout.
+      - name: Test
+        run: pnpm test
+
+      - name: Pack the standard plugin tarball
+        run: pnpm pack --pack-destination dist
+
+      - name: Write SHA256SUMS
+        run: node tools/checksums.mjs dist
+
+      - name: Install the actual tarball and smoke-test it
+        run: node tools/verify-package.mjs dist --sums dist/SHA256SUMS
+
+      - name: Inspect any existing Release for this tag
+        id: existing
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          releases="$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100")"
+          match="$(jq -c --arg tag "$tag" '.[] | select(.tag_name == $tag)' <<<"$releases" | head -n 1)"
+          if [ -z "$match" ]; then
+            echo 'state=none' >> "$GITHUB_OUTPUT"
+            echo 'commit=' >> "$GITHUB_OUTPUT"
+            echo "No existing Release for $tag"
+          else
+            state="$(jq -r 'if .draft then "draft" else "published" end' <<<"$match")"
+            commit="$(jq -r '.target_commitish' <<<"$match")"
+            echo "state=$state" >> "$GITHUB_OUTPUT"
+            echo "commit=$commit" >> "$GITHUB_OUTPUT"
+            echo "Existing Release for $tag is $state at $commit"
+          fi
+          # Compare semver, not creation time, when deciding the "latest" flag.
+          latest="$(jq -r '.[] | select((.draft | not) and (.prerelease | not)) | .tag_name' <<<"$releases" \
+            | sed 's/^v//' | sort -V | tail -n 1)"
+          if [ -n "$latest" ]; then
+            echo "latest=v$latest" >> "$GITHUB_OUTPUT"
+          else
+            echo 'latest=' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide release policy
+        id: plan
+        run: |
+          set -euo pipefail
+          node tools/release-policy.mjs \
+            --tag "$GITHUB_REF_NAME" \
+            --commit "$GITHUB_SHA" \
+            --existing "${{ steps.existing.outputs.state }}" \
+            --existing-commit "${{ steps.existing.outputs.commit }}" \
+            --latest-stable "${{ steps.existing.outputs.latest }}"
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          {
+            echo "# dsh-node ${GITHUB_REF_NAME}"
+            echo
+            echo "- Node.js runtime: >= 20"
+            echo "- Build toolchain: pnpm ${PNPM_VERSION}"
+            echo "- DSH host: >= 0.1.2-alpha.2 (verified on 0.2.1-rc.2)"
+            echo
+            echo "Install, switch profiles, and roll back:"
+            echo "https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/docs/install-version.md"
+            echo
+            echo "## Changes"
+            git log --format='- %s' -20 "${GITHUB_SHA}"
+          } > dist/release-notes.md
+
+      - name: Create a draft Release
+        if: steps.plan.outputs.action == 'create'
+        run: |
+          set -euo pipefail
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --target "$GITHUB_SHA" \
+            --title "dsh-node $GITHUB_REF_NAME" \
+            --notes-file dist/release-notes.md
+
+      - name: Upload tarball and SHA256SUMS to the draft
+        run: |
+          set -euo pipefail
+          gh release upload "$GITHUB_REF_NAME" dist/*.tgz dist/SHA256SUMS --clobber
+
+      - name: Verify the draft assets before making it public
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json isDraft,tagName,assets > dist/draft.json
+          jq -e '.isDraft == true' dist/draft.json > /dev/null
+          jq -e --arg tag "$GITHUB_REF_NAME" '.tagName == $tag' dist/draft.json > /dev/null
+          jq -e '[.assets[] | select(.name == "SHA256SUMS" or (.name | endswith(".tgz")))] | length == 2' dist/draft.json > /dev/null
+          mkdir -p dist/downloaded
+          gh release download "$GITHUB_REF_NAME" --dir dist/downloaded --pattern '*'
+          (cd dist/downloaded && sha256sum -c SHA256SUMS)
+
+      - name: Publish (prereleases never become latest)
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.plan.outputs.prerelease }}" = "true" ]; then
+            gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$GITHUB_REF_NAME" --draft=false --prerelease=false --latest="${{ steps.plan.outputs.latest }}"
+          fi
+
+      - name: Verify the published Release
+        run: |
+          set -euo pipefail
+          gh release view "$GITHUB_REF_NAME" --json isDraft,isPrerelease,tagName,url > dist/published.json
+          jq -e '.isDraft == false' dist/published.json > /dev/null
+          jq -e --arg tag "$GITHUB_REF_NAME" '.tagName == $tag' dist/published.json > /dev/null
+          jq -e --arg expected "${{ steps.plan.outputs.prerelease }}" '.isPrerelease == ($expected == "true")' dist/published.json > /dev/null
+          echo "Published: $(jq -r '.url' dist/published.json)"
+
+      - name: Report the result
+        run: |
+          {
+            echo "## dsh-node $GITHUB_REF_NAME"
+            echo
+            echo "- commit: \`$GITHUB_SHA\`"
+            echo "- channel: ${{ steps.plan.outputs.channel }}"
+            echo "- prerelease: ${{ steps.plan.outputs.prerelease }}"
+            echo "- marked latest: ${{ steps.plan.outputs.latest }}"
+            echo "- Release: $(jq -r '.url' dist/published.json)"
+          } >> "$GITHUB_STEP_SUMMARY"

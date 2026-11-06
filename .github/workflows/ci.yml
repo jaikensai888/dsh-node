@@ -1,0 +1,78 @@
+# Normal branch/PR verification. This workflow never creates a Release and never
+# gets a write token: publishing happens only in release.yml, on a version tag.
+name: CI
+
+on:
+  push:
+    # Every branch, but not tags: a version tag is handled by release.yml.
+    branches: ['**']
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned and recorded in docs/git-push.md. Node 22 is the oldest LTS that
+  # provides `node:sqlite` (used behind a feature check by the usage collector);
+  # `engines.node` still allows any >= 20 runtime.
+  NODE_VERSION: '22.x'
+  PNPM_VERSION: '11.8.0'
+
+jobs:
+  verify:
+    name: typecheck, test, build, package smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install from the locked dependency graph
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck (app and release boundaries)
+        run: pnpm typecheck
+
+      # `client-bundle.test.ts` reads the built `lib/client.js`, so a clean
+      # checkout must build before the test step.
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test
+
+      - name: Pack the standard plugin tarball
+        run: pnpm pack --pack-destination dist
+
+      - name: Write SHA256SUMS
+        run: node tools/checksums.mjs dist
+
+      - name: Install the actual tarball and smoke-test it
+        run: node tools/verify-package.mjs dist --sums dist/SHA256SUMS
+
+      - name: Upload the verified artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-node-package
+          path: |
+            dist/*.tgz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7

@@ -51,6 +51,7 @@
       <ul>
         <li><a href="#前置条件">前置条件</a></li>
         <li><a href="#安装">安装</a></li>
+        <li><a href="#版本查询与指定版本安装">版本查询与指定版本安装</a></li>
       </ul>
     </li>
     <li>
@@ -133,11 +134,22 @@ dsh-node/
 │   ├── net/trust-fence.ts    # DNS rebinding / 跨站请求围栏
 │   ├── admin/                # nodeAdmin/* 管理面：路径策略、skill、审计
 │   └── client/               # 浏览器半侧：侧边栏页脚 + 状态/配置面板
-├── test/                     # 13 个文件 / 473 个测试
+├── test/                     # 单元、集成与架构守卫测试
+├── tools/
+│   ├── build-info.mjs        # package.json → build-info.json / 发布前校验
+│   ├── checksums.mjs         # 生成/校验 SHA256SUMS
+│   ├── verify-package.mjs    # 临时目录安装实际 tgz 并冒烟
+│   └── release-policy.mjs    # Tag/草稿/latest 发布策略
 ├── tools/fake-coordinator.mjs  # 本地假协调器，用来观察握手与转发
+├── .github/workflows/
+│   ├── ci.yml                # 普通 push / PR：测试、构建、打包、安装冒烟
+│   └── release.yml           # 版本 Tag：草稿 Release → 校验附件 → 发布
+├── build-info.json           # 构建生成（已忽略），随包发布
 └── docs/
     ├── COORDINATOR.md        # 与协调器的对接契约
-    └── GROUND-TRUTH.md       # 工程记录：实测结论、踩坑、设计取舍
+    ├── GROUND-TRUTH.md       # 工程记录：实测结论、踩坑、设计取舍
+    ├── git-push.md           # git push 与版本发布流程
+    └── install-version.md    # 版本查询、指定 Release 安装与回滚
 ```
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
@@ -177,14 +189,14 @@ dsh-node/
 <!-- 快速开始 -->
 ## 快速开始
 
-这是一个 DSH **Host 侧树外插件**，不走 npm 发布，直接从仓库链接进本机 profile。
+这是一个 DSH **Host 侧树外插件**，不走 npm 发布。开发时直接从仓库链接进本机 profile；生产或指定版本安装使用 GitHub Release 的已构建 tgz（见[版本查询与指定版本安装](#版本查询与指定版本安装)）。
 
 ### 前置条件
 
 - **Node.js ≥ 20**（`package.json` 的 `engines`）
 - **pnpm**：安装依赖与执行构建
 - **本机 DSH profile**（示例用 `desktop`），版本 **≥ `0.1.2-alpha.2`**，
-  当前验证于 `0.1.5-rc.2`
+  当前验证于 `0.2.1-rc.2`
 - **一个协调器**：用 [`dsh-coordinator`](https://github.com/jaikensai888/dsh-coordinator)，
   或自行实现 `dsh-node/1` 协议（见 [`docs/COORDINATOR.md`](docs/COORDINATOR.md)）
 
@@ -197,8 +209,8 @@ dsh-node/
    cd dsh-node
    pnpm install
    pnpm --config.verify-deps-before-run=false typecheck
-   pnpm --config.verify-deps-before-run=false test
    pnpm --config.verify-deps-before-run=false build
+   pnpm --config.verify-deps-before-run=false test
    ```
 
    > `--config.verify-deps-before-run=false` 不是可选的：`pnpm run` 的依赖状态检查会再起一个
@@ -218,7 +230,11 @@ dsh-node/
    dsh plugin --profile desktop add dsh-node@link:<本仓库绝对路径>
    ```
 
-3. 在 profile 的 `cordis.patch.yml` 里插入一行（**必须是 `- insert:` 数组形式**）
+3. 确认 profile 只组合一次 `dsh-node`
+
+   优先把 `"dsh-node"` 放进 profile `package.json` 的 `dsh.profile.bundles` 数组；包的
+   `dsh.bundle.patch` 会自动插入下面这一行。只有不走 bundles 时才手工写进
+   `cordis.patch.yml`（**必须是 `- insert:` 数组形式**）：
 
    ```yaml
    - insert:
@@ -226,10 +242,27 @@ dsh-node/
          name: 'dsh-node'
    ```
 
+   > 两种方式**只能选一种**。用 `dsh --profile desktop --dump-config` 确认只有一条
+   > `dsh-node`；两条会让同一次启动挂载两次。
+
 4. 重启 DSH
 
    > 改完 `cordis.patch.yml` **必须重启 DSH**：实测 `patchReload: "live"` 在运行树里不生效
    > （hmr 插件没有 active），改 entry / 改 config 后运行中的实例不会跟随。
+
+### 版本查询与指定版本安装
+
+`package.json` 是版本号唯一来源。构建会生成包根 `build-info.json`，并把同一份信息嵌入插件：
+
+- **安装版本**：读 profile 的 `node_modules/dsh-node/build-info.json`（`version` / `commit` / `channel` / `dirty`）。
+- **实际运行版本**：`GET /dsh-node/api/status` 返回的 `pluginVersion` 与 `buildInfo`；来自进程加载的构建，不读磁盘文件。
+- **两者不一致**：旧进程仍在运行旧构建；重启 DSH 后才算升级完成，不能用替换磁盘文件冒充升级。
+
+从 GitHub Release 下载指定版本、校验 SHA-256、安装生产依赖、切换指定 profile、重载并验证、保留旧版本回滚的完整步骤见
+[`docs/install-version.md`](docs/install-version.md)。
+
+普通 `git push` 只运行 CI；推送 `vX.Y.Z` Tag 才测试、构建、打包、生成 `SHA256SUMS`、冒烟并发布 Release，见
+[`docs/git-push.md`](docs/git-push.md)。
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -288,9 +321,30 @@ DSH 0.2.1-rc.2 的 Gateway 要求每个普通及流式调用携带调用方 `Pee
 dsh --profile desktop --dump-config    # 在输出里找 dsh-node
 
 # 本地只读路由（不需要重启，直接开在 DSH 的 web 服务上）
-curl http://127.0.0.1:<port>/dsh-node/api/status
-curl http://127.0.0.1:<port>/dsh-node/api/config
+curl --noproxy '*' http://127.0.0.1:<port>/dsh-node/api/status
+curl --noproxy '*' http://127.0.0.1:<port>/dsh-node/api/config
 ```
+
+`/api/status` 里与版本有关的字段：
+
+```json
+{
+  "ok": true,
+  "value": {
+    "state": "ready",
+    "pluginVersion": "0.2.0",
+    "buildInfo": {
+      "version": "0.2.0",
+      "commit": "…",
+      "builtAt": "2026-11-06T00:00:00.000Z",
+      "channel": "stable",
+      "dirty": false
+    }
+  }
+}
+```
+
+`pluginVersion` 与 `buildInfo.version` 是**当前进程**加载的构建；安装目录里的 `build-info.json` 可能已经是新包。两者不一致时重启 DSH 才算完成升级。端口按实际 DSH Web URL 取，不要硬编码；DSH Desktop 的 Web 鉴权/信任围栏可能让未认证 `curl` 返回 403，此时用同源浏览器控制台请求，详见 [`docs/install-version.md`](docs/install-version.md)。
 
 界面上的状态点：**实心绿 = 已连接**，环状琥珀 = 连接中/退避重连，空心灰 = 未配置或已断开。
 悬停有完整句子，形状本身也区分状态（不依赖颜色）。
@@ -461,7 +515,7 @@ dsh plugin --profile desktop remove dsh-node
 - **`rpc.cancel` 与请求超时还没有真实环境的证据**：两者都需要无副作用的慢方法，目前由
   `request-manager` 单测与 `integration.test.ts` 的组合测试覆盖（`stream.cancel` 已在真机联调中验证）。
 - **`gateway/*` 原码保留要求 DSH ≥ `0.1.2-alpha.2`**：更早的 `alpha.1` 上网关自己就把边界错误压成
-  `internal`，本插件用 `wireStream.failure()` 忠实复现、不自己抠码。当前 `0.1.5-rc.2` 成立。
+  `internal`，本插件用 `wireStream.failure()` 忠实复现、不自己抠码。当前 `0.2.1-rc.2` 成立。
 - **源码模式插件的 namespace 枚举**依赖上游公开的 `typertRemote` 绑定：上游若改成私有，这类插件
   会无法被派发（生成器插件不受影响）。
 

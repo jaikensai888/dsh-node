@@ -1,6 +1,18 @@
 import type { UserConfig } from 'tsdown'
+import { prepareBuildInfo } from './tools/build-info.mjs'
 
 const PACKAGE_ID = 'dsh-node'
+
+/**
+ * One metadata object for this build.
+ *
+ * Evaluating it here — before tsdown compiles either half — writes the
+ * `build-info.json` that ships in the package and gives the host bundle the exact
+ * same values through `define`. `DSH_NODE_RELEASE=1` plus
+ * `DSH_NODE_RELEASE_TAG=v<version>` switches on the release validation in
+ * `tools/build-info.mjs`; every other invocation produces `channel: "dev"`.
+ */
+const buildInfo = prepareBuildInfo()
 
 /**
  * Specifiers a DSH client bundle may `require()` at runtime.
@@ -81,6 +93,11 @@ export default [
     sourcemap: true,
     clean: false,
     external: ['ws', 'schemastery'],
+    define: {
+      // A JSON string, parsed once in `src/build-info.ts`. The file on disk is for
+      // inspection and packaging; this constant is what the process reports.
+      __DSH_NODE_BUILD_INFO_JSON__: JSON.stringify(JSON.stringify(buildInfo)),
+    },
   },
   clientBundle('client.js', PACKAGE_ID),
 ] satisfies UserConfig[]

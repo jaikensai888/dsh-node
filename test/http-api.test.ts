@@ -36,6 +36,13 @@ function snapshot(overrides: Partial<NodeStatusView> = {}): NodeStatusView {
   return {
     ...base,
     pluginVersion: '0.1.0',
+    buildInfo: {
+      version: '0.1.0',
+      commit: 'a'.repeat(40),
+      builtAt: '2026-11-06T00:00:00.000Z',
+      channel: 'dev',
+      dirty: true,
+    },
     mode: 'full-access',
     uptimeMs: 1_000,
     updatedAt: '2026-09-20T12:00:00.000Z',
@@ -241,6 +248,16 @@ describe('the status route', () => {
     // `coordinatorOrigin` is origin-only by construction; assert the route does not
     // put a path, query, or credential back.
     expect(body.value.coordinatorOrigin).toBe('ws://127.0.0.1:39471')
+    // The running build is part of the status; the version in it is the same one
+    // the compatibility field reports.
+    expect(body.value.buildInfo).toEqual({
+      version: '0.1.0',
+      commit: 'a'.repeat(40),
+      builtAt: '2026-11-06T00:00:00.000Z',
+      channel: 'dev',
+      dirty: true,
+    })
+    expect(body.value.buildInfo?.version).toBe(body.value.pluginVersion)
     expect(result.text).not.toContain(TOKEN)
   })
 
@@ -260,7 +277,7 @@ describe('the status route', () => {
     // And the route adds no field of its own beyond the documented view.
     const keys = Object.keys((call(handler).body as { value: Record<string, unknown> }).value).sort()
     expect(keys).toEqual([
-      'activeStreams', 'connectionId', 'coordinatorOrigin', 'inFlightRequests', 'lastConnectedAt',
+      'activeStreams', 'buildInfo', 'connectionId', 'coordinatorOrigin', 'inFlightRequests', 'lastConnectedAt',
       'mode', 'nodeId', 'nodeName', 'pluginVersion', 'reconnectAttempt', 'role', 'state', 'updatedAt', 'uptimeMs',
     ])
   })

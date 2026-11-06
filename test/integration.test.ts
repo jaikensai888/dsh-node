@@ -14,7 +14,8 @@
  * decorator transpilation is involved.
  */
 
-import { mkdir, mkdtemp, readdir, readFile, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Context } from '@deepseek-ai/cordis'
@@ -438,11 +439,61 @@ interface NodeStatusView {
   activeStreams: number
   connectionId?: string
   lastError?: { code: string; message: string }
+  pluginVersion?: string
+  buildInfo?: {
+    version: string
+    commit: string | null
+    builtAt: string
+    channel: string
+    dirty: boolean | null
+  }
 }
 
 /** A mounted plugin fiber, reduced to what this test disposes. */
 interface Mounted {
   dispose: () => Promise<void>
+}
+
+/** One route the fake Web server captured from `dsh-node`. */
+interface RegisteredRoute {
+  handler: (request: IncomingMessage, response: ServerResponse) => void
+}
+
+/** Minimal `webServer` service, enough to observe the real route wiring. */
+class FakeWebServer {
+  route: RegisteredRoute | undefined
+
+  register(route: RegisteredRoute): () => void {
+    this.route = route
+    return () => {
+      if (this.route === route) this.route = undefined
+    }
+  }
+}
+
+/** Call the captured status route and return its envelope value. */
+function readNodeStatus(route: RegisteredRoute): Record<string, unknown> {
+  let status = 0
+  let text = ''
+  let ended = false
+  const response = {
+    req: { method: 'GET' },
+    get writableEnded() { return ended },
+    setHeader() {},
+    writeHead(code: number) { status = code },
+    end(body?: string) {
+      if (typeof body === 'string') text = body
+      ended = true
+    },
+  }
+  route.handler(
+    { url: '/dsh-node/api/status', method: 'GET', headers: { host: '127.0.0.1:43120' } } as unknown as IncomingMessage,
+    response as unknown as ServerResponse,
+  )
+  expect(status).toBe(200)
+  const envelope = JSON.parse(text) as { ok: boolean; value: Record<string, unknown> }
+  expect(envelope.ok).toBe(true)
+  return envelope.value
 }
 
 /** Poll until `probe` yields a value. */
@@ -1172,6 +1223,39 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
     expect(coordinator.sessions.length).toBe(seen)
   }, 20_000)
 
+  it('serves the embedded build even when build-info.json is replaced on disk', async () => {
+    // The running process must never report a version that merely happens to be
+    // installed beside it. `build-info.json` is packaging metadata; the version in
+    // a status response is compiled into the bundle that is executing.
+    const web = new FakeWebServer()
+    root.provide('webServer', web)
+    nodeFiber = await mount(NODE_PLUGIN, { identityFile })
+    await eventually(() => web.route, 'the status route registration')
+
+    const first = readNodeStatus(web.route!)
+    expect(first['buildInfo']).toEqual(nodePlugin.BUILD_INFO)
+    expect(first['pluginVersion']).toBe(nodePlugin.BUILD_INFO.version)
+
+    const file = join(process.cwd(), 'build-info.json')
+    let original: string | undefined
+    try {
+      original = await readFile(file, 'utf8')
+    } catch {
+      original = undefined
+    }
+    // Write the lie an operator could create by unpacking a newer tarball over the
+    // installed package without restarting DSH.
+    await writeFile(file, JSON.stringify({ ...nodePlugin.BUILD_INFO, version: '9.9.9' }))
+    try {
+      const second = readNodeStatus(web.route!)
+      expect(second['buildInfo']).toEqual(nodePlugin.BUILD_INFO)
+      expect((second['buildInfo'] as { version: string }).version).not.toBe('9.9.9')
+    } finally {
+      if (original === undefined) await rm(file, { force: true })
+      else await writeFile(file, original)
+    }
+  }, 20_000)
+
   it('does not connect at all while the URL or token is missing', async () => {
     const bare = new Context()
     try {
@@ -1467,5 +1551,7 @@ describe('architecture guards (spec §1.1, §9.3, §15)', () => {
     // `nodeAdmin/describe` reports this, so a drift would make a Coordinator
     // reason about a version that is not the one running.
     expect(nodePlugin.PLUGIN_VERSION).toBe(manifest.version)
+    expect(nodePlugin.BUILD_INFO.version).toBe(manifest.version)
+    expect(nodePlugin.PLUGIN_VERSION).toBe(nodePlugin.BUILD_INFO.version)
   })
 })

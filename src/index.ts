@@ -19,6 +19,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { ADMIN_DESCRIPTORS, ADMIN_SERVICE_KEY, NodeAdminOwner } from './admin/service.js'
+import { BUILD_INFO, PLUGIN_VERSION } from './build-info.js'
 import { resolveNodeConfig, Config, type DshNodeRuntimeConfig, type NodeConfigResolution } from './config.js'
 import { mergeNodeConfig, resolveConfigFile, type ConnectionIntent, type StoredNodeConfig } from './config-file.js'
 import { NodeConfigService, loadStoredConfig } from './config-service.js'
@@ -68,6 +69,8 @@ import { NodeUsageOwner, USAGE_DESCRIPTORS, USAGE_SERVICE_KEY } from './usage/se
 import { NodeUsageStore } from './usage/store.js'
 
 export { Config, resolveNodeConfig } from './config.js'
+export { BUILD_INFO, PLUGIN_VERSION, buildInfoFromEmbedded } from './build-info.js'
+export type { BuildChannel, BuildInfo } from './build-info.js'
 export type { DshNodeRuntimeConfig, NodeConfigResolution } from './config.js'
 export { NodeError, RemoteCodeError, nodeFailure } from './errors.js'
 export { loadOrCreateIdentity, generateNodeId, resolveIdentityFile } from './identity.js'
@@ -1234,6 +1237,7 @@ function installStatusRoute(
           inFlightRequests: 0,
           activeStreams: 0,
           pluginVersion: PLUGIN_VERSION,
+          buildInfo: BUILD_INFO,
           mode: 'full-access',
           uptimeMs: 0,
           updatedAt: new Date().toISOString(),
@@ -1244,6 +1248,7 @@ function installStatusRoute(
         // `coordinatorOrigin` is scheme+host+port only.
         ...current.status,
         pluginVersion: PLUGIN_VERSION,
+        buildInfo: BUILD_INFO,
         mode: 'full-access',
         uptimeMs: Date.now() - current.startedAt,
         updatedAt: new Date().toISOString(),
@@ -1570,9 +1575,6 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
 
   installStatusRoute(ctx, () => current, configService, connection)
 }
-
-/** Plugin version, kept in sync with `package.json` by a test. */
-export const PLUGIN_VERSION = '0.1.0'
 
 /**
  * The Host-side Typert registration entry point, as `dsh-typert-loader` documents

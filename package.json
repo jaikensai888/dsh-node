@@ -19,18 +19,25 @@
   "files": [
     "lib",
     "cordis.patch.yml",
+    "build-info.json",
     "README.md"
   ],
   "scripts": {
     "build": "pnpm run declarations && tsdown",
+    "build-info": "node tools/build-info.mjs --write",
+    "checksums": "node tools/checksums.mjs dist",
     "declarations": "tsc -p tsconfig.build.json",
     "dev": "tsdown --watch",
+    "pack:release": "pnpm pack --pack-destination dist",
+    "prepack": "node tools/build-info.mjs --check",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run"
+    "verify:package": "node tools/verify-package.mjs"
   },
   "engines": {
     "node": ">=20"
   },
+  "packageManager": "pnpm@11.8.0",
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
