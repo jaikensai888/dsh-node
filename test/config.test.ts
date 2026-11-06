@@ -502,10 +502,11 @@ describe('identity persistence (spec §12.1 item 5, §5.8)', () => {
   })
 
   it('resolves the identity file under the harness home', () => {
-    const env = { DSH_HOME: 'C:\\dsh-home' }
-    expect(resolveDshHome(env)).toBe('C:\\dsh-home')
-    expect(resolveIdentityDir(env)).toBe(join('C:\\dsh-home', 'storages', 'dsh-node'))
-    expect(resolveIdentityFile(env)).toBe(join('C:\\dsh-home', 'storages', 'dsh-node', IDENTITY_FILE_NAME))
+    const home = process.platform === 'win32' ? 'C:\\dsh-home' : '/dsh-home'
+    const env = { DSH_HOME: home }
+    expect(resolveDshHome(env)).toBe(home)
+    expect(resolveIdentityDir(env)).toBe(join(home, 'storages', 'dsh-node'))
+    expect(resolveIdentityFile(env)).toBe(join(home, 'storages', 'dsh-node', IDENTITY_FILE_NAME))
   })
 
   it('ignores a blank DSH_HOME rather than resolving to the cwd', () => {
