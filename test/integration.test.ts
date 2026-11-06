@@ -14,6 +14,7 @@
  * decorator transpilation is involved.
  */
 
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
@@ -26,6 +27,7 @@ import { WebSocketServer, type WebSocket } from 'ws'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as nodePlugin from '../src/index.js'
 import { resolveConfigFile, writeConfigFile } from '../src/index.js'
+import type { ToolDefinitionLike } from '../src/files/deliver-tool.js'
 import {
   NODE_MODES,
   PROTOCOL_VERSION,
@@ -1335,6 +1337,140 @@ describe('real Cordis + Typert Gateway + registered Remote + fake Coordinator', 
       await rm(file, { force: true })
     }
   }, 20_000)
+
+  it('advertises and dispatches the sessionFiles surface end to end', async () => {
+    const session = await connectNode()
+    const ready = session.frame<ReadyFrame>('ready')!
+    const endpoints = ready.capabilities.remotes.map(entry => entry.endpoint)
+    for (const method of [
+      'describe', 'beginUpload', 'writeChunk', 'commitUpload',
+      'abortUpload', 'resolveAttachments', 'listArtifacts', 'readArtifactChunk',
+    ]) {
+      expect(endpoints).toContain(`sessionFiles/${method}`)
+    }
+
+    const filesSession = 'integration-files-session'
+    const bytes = Buffer.from('hello')
+    const sha256 = createHash('sha256').update(bytes).digest('hex')
+
+    session.request('files-describe', 'sessionFiles/describe', { sessionId: filesSession })
+    const described = await coordinator.result('files-describe')
+    expect(described.result).toMatchObject({
+      ok: true,
+      value: { protocolVersion: 1, deliveryTool: 'unavailable' },
+    })
+
+    session.request('files-begin', 'sessionFiles/beginUpload', {
+      sessionId: filesSession,
+      name: '你好.txt',
+      size: bytes.byteLength,
+      clientUploadId: 'client-integration',
+    })
+    const begun = await coordinator.result('files-begin')
+    expect(begun.result.ok).toBe(true)
+    const uploadId = (begun.result as { ok: true; value: { uploadId: string } }).value.uploadId
+
+    session.request('files-write', 'sessionFiles/writeChunk', {
+      sessionId: filesSession,
+      uploadId,
+      offset: 0,
+      base64: bytes.toString('base64'),
+    })
+    expect((await coordinator.result('files-write')).result)
+      .toMatchObject({ ok: true, value: { nextOffset: 5, received: 5 } })
+
+    session.request('files-commit', 'sessionFiles/commitUpload', {
+      sessionId: filesSession,
+      uploadId,
+      size: bytes.byteLength,
+      sha256,
+    })
+    const committed = await coordinator.result('files-commit')
+    expect(committed.result.ok).toBe(true)
+    const attachment = (committed.result as { ok: true; value: { attachmentId: string; remotePath: string; name: string } }).value
+    expect(attachment.name).toBe('你好.txt')
+    expect(await readFile(attachment.remotePath, 'utf8')).toBe('hello')
+
+    session.request('files-resolve', 'sessionFiles/resolveAttachments', {
+      sessionId: filesSession,
+      attachmentIds: [attachment.attachmentId],
+    })
+    expect((await coordinator.result('files-resolve')).result).toMatchObject({
+      ok: true,
+      value: { attachments: [{ attachmentId: attachment.attachmentId, size: 5 }] },
+    })
+
+    session.request('files-artifacts', 'sessionFiles/listArtifacts', { sessionId: filesSession })
+    expect((await coordinator.result('files-artifacts')).result).toEqual({ ok: true, value: { artifacts: [] } })
+
+    session.request('files-missing', 'sessionFiles/readArtifactChunk', {
+      sessionId: filesSession,
+      artifactId: 'no-such-artifact',
+      offset: 0,
+      length: 4,
+    })
+    expect((await coordinator.result('files-missing')).result)
+      .toMatchObject({ ok: false, error: { code: 'files/not-found' } })
+  }, 20_000)
+
+  it('registers deliver_file into a live tools registry and serves the artifact over RPC', async () => {
+    const captured: { definition?: ToolDefinitionLike } = {}
+    const toolsPlugin = {
+      name: 'integration-tools',
+      apply(toolsCtx: Context): void {
+        toolsCtx.provide('tools', {
+          register(definition: ToolDefinitionLike): () => void {
+            captured.definition = definition
+            return () => undefined
+          },
+        })
+      },
+    }
+    await mount(toolsPlugin)
+
+    const session = await connectNode()
+    await eventually(() => captured.definition, 'deliver_file registration')
+    session.request('files-tool-describe', 'sessionFiles/describe', { sessionId: 'tool-session' })
+    expect((await coordinator.result('files-tool-describe')).result)
+      .toMatchObject({ ok: true, value: { deliveryTool: 'available' } })
+
+    const workspace = join(identityDir, 'workspace')
+    await mkdir(workspace, { recursive: true })
+    const source = join(workspace, '交付 文档.md')
+    await writeFile(source, '# delivered\n')
+
+    const definition = captured.definition!
+    const value = await definition.execute({ path: source }, {
+      agent: { id: 'tool-session', session: { id: 'tool-session', header: { cwd: workspace } } },
+    }) as Record<string, unknown>
+    expect(value['sessionId']).toBe('tool-session')
+    expect(value['name']).toBe('交付 文档.md')
+    expect(value['remotePath']).toBeUndefined()
+
+    session.request('files-tool-list', 'sessionFiles/listArtifacts', { sessionId: 'tool-session' })
+    const listed = await coordinator.result('files-tool-list')
+    expect(listed.result).toMatchObject({
+      ok: true,
+      value: { artifacts: [{ artifactId: value['artifactId'], name: '交付 文档.md', state: 'ready' }] },
+    })
+    const artifactId = value['artifactId'] as string
+
+    session.request('files-tool-read', 'sessionFiles/readArtifactChunk', {
+      sessionId: 'tool-session',
+      artifactId,
+      offset: 0,
+      length: 64,
+    })
+    const read = await coordinator.result('files-tool-read')
+    expect(read.result.ok).toBe(true)
+    const chunk = (read.result as { ok: true; value: { base64: string; totalSize: number } }).value
+    expect(Buffer.from(chunk.base64, 'base64').toString('utf8')).toBe('# delivered\n')
+    expect(chunk.totalSize).toBe(12)
+
+    session.request('files-tool-other-session', 'sessionFiles/listArtifacts', { sessionId: 'another-session' })
+    expect((await coordinator.result('files-tool-other-session')).result)
+      .toEqual({ ok: true, value: { artifacts: [] } })
+  }, 20_000)
 })
 
 describe('architecture guards (spec §1.1, §9.3, §15)', () => {
@@ -1519,12 +1655,15 @@ describe('architecture guards (spec §1.1, §9.3, §15)', () => {
 
   it('reads and writes the filesystem only through the policy fence', async () => {
     const sources = await readSources()
-    // Exactly two files own a path of their own, and both derive it from `DSH_HOME`
-    // with a hard-coded name: `identity.ts` (the node id) and `config-file.ts` (the
-    // settings the panel writes). Neither takes a path from a caller. Every *other*
-    // filesystem access in this plugin goes through `admin/`, whose policy fence
-    // decides each path before it is touched.
-    const owners = new Set(['identity.ts', 'config-file.ts'])
+    // Exactly three files own a path of their own, and all derive it from
+    // `DSH_HOME` with a hard-coded name: `identity.ts` (the node id),
+    // `config-file.ts` (the settings the panel writes), and `files/store.ts`
+    // (session attachments and artifact snapshots). The store never takes a
+    // caller path: uploads are written under a hashed session id with a
+    // server-generated UUID, and the one path it *does* accept — `deliver_file` —
+    // is checked by `decidePath` before it is read. Every other filesystem access
+    // goes through `admin/`, whose policy fence decides each path first.
+    const owners = new Set(['identity.ts', 'config-file.ts', 'files/store.ts'])
     for (const source of sources) {
       if (!/from 'node:fs\/promises'/u.test(source.text)) continue
       const allowed = owners.has(source.name) || source.name.startsWith('admin/')

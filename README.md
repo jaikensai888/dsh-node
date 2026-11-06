@@ -484,6 +484,31 @@ dsh plugin --profile desktop remove dsh-node
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+<!-- 会话文件 -->
+## 会话文件（2026-10-29 新增）
+
+这一版把「远程会话双向文件附件」补齐：master 把用户选的文件推到本节点，Agent 执行后用
+`deliver_file` 登记产物，master 再按块下载。全部复用现有出站 WebSocket，**不新增入站端口**。
+
+| 能力 | 位置 | 说明 |
+| --- | --- | --- |
+| `sessionFiles/*` RPC | `src/files/service.ts` | `describe`、`beginUpload`、`writeChunk`、`commitUpload`、`abortUpload`、`resolveAttachments`、`listArtifacts`、`readArtifactChunk`；失败码统一为 `files/*` |
+| 存储与配额 | `src/files/store.ts` | `$DSH_HOME/dsh-node/files/<sha256(sessionId)>/`；单文件 20 MiB、每消息 5 个、每节点 2 个活跃上传、总量 1 GiB；附件与产物保留 7 天，未完成上传 1 小时回收 |
+| 交付工具 | `src/files/deliver-tool.ts` | `deliver_file({path,name?})`；会话身份取自 `exec.agent.session.id`；只接受会话工作目录或该会话附件目录内的普通文件，复制只读快照并校验源文件身份 |
+
+安全边界：
+
+- 上传文件名只作展示，落盘使用服务器生成的 UUID；`sessionId` 先做 SHA-256 再拼路径。
+- 半文件绝不标记为 ready：先写 `incoming/`，校验声明大小、实际大小与逐块 SHA-256 后原子 rename。
+- `deliver_file` 拒绝目录、symlink/junction 逃逸、越界 realpath 与伪造会话；不向浏览器暴露产物绝对路径。
+- 到期只删字节、保留元数据，会话里仍能看到「已过期」。
+
+升级顺序为 **node → coordinator → master**。旧 master/coordinator 不认识 `sessionFiles` 时仍可使用纯文本
+会话；旧 node 会让 master 禁用「＋」并提示升级。数据目录要保留，删除
+`$DSH_HOME/dsh-node/files/` 等于丢弃尚未到期的附件与产物。
+
+<p align="right">(<a href="#readme-top">back to top</a>)</p>
+
 <!-- 路线图 -->
 ## 路线图
 

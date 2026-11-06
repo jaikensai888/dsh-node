@@ -18,6 +18,7 @@
 
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
+import { join } from 'node:path'
 import { ADMIN_DESCRIPTORS, ADMIN_SERVICE_KEY, NodeAdminOwner } from './admin/service.js'
 import { BUILD_INFO, PLUGIN_VERSION } from './build-info.js'
 import { resolveNodeConfig, Config, type DshNodeRuntimeConfig, type NodeConfigResolution } from './config.js'
@@ -33,7 +34,17 @@ import {
 } from './connector.js'
 import { NodeError, RemoteCodeError, nodeFailure, type NodeFailure } from './errors.js'
 import { capabilitySurfaceHash, parseEndpoint, parseRequestArgs } from './frame-codec.js'
-import { loadOrCreateIdentity, resolveIdentityFile, resolveUsageDatabaseFile, type NodeIdentity } from './identity.js'
+import {
+  loadOrCreateIdentity,
+  resolveDshHome,
+  resolveIdentityFile,
+  resolveUsageDatabaseFile,
+  type NodeIdentity,
+} from './identity.js'
+import { registerDeliverTool } from './files/deliver-tool.js'
+import { FILES_DESCRIPTORS, SessionFilesOwner } from './files/service.js'
+import { FILES_SERVICE_KEY } from './files/types.js'
+import { SessionFileStore } from './files/store.js'
 import {
   NodeQuestionBridge,
   QUESTIONS_DESCRIPTORS,
@@ -95,6 +106,10 @@ export { installUsageCollector, stateOf as attemptStateOf } from './usage/collec
 export { NodeUsageOwner, USAGE_DESCRIPTORS, USAGE_NAMESPACE, USAGE_SERVICE_KEY } from './usage/service.js'
 export { NodeUsageStore } from './usage/store.js'
 export * from './usage/types.js'
+export { FILES_DESCRIPTORS, SessionFilesOwner } from './files/service.js'
+export { SessionFileStore, sessionKeyOf } from './files/store.js'
+export { createDeliverToolDefinition, DELIVER_TOOL_NAME, readSessionId, registerDeliverTool } from './files/deliver-tool.js'
+export * from './files/types.js'
 export * from './protocol.js'
 
 /** Host-half plugin name. Must equal the package name. */
@@ -1373,6 +1388,51 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
   const questions = new NodeQuestionBridge()
 
   /*
+    Session files are plugin-scoped, not host-scoped.
+
+    A configuration save rebuilds `DshNodeHost`, and an upload in flight must
+    survive that: rebuilding for a new Coordinator URL is not a reason to lose a
+    file the user already sent. The store also owns the artifact snapshots, which
+    belong to sessions rather than to one socket.
+  */
+  const filesStore = new SessionFileStore({
+    root: join(resolveDshHome(env), 'dsh-node', 'files'),
+    nodeId: () => current?.nodeId ?? '',
+    sessionCwd: sessionId => sessionCwdOf(ctx, sessionId),
+  })
+  let deliveryToolAvailable = false
+  const filesOwner = new SessionFilesOwner({
+    store: filesStore,
+    deliveryToolAvailable: () => deliveryToolAvailable,
+  })
+  const disposeFilesService = ctx.provide(FILES_SERVICE_KEY, filesOwner)
+
+  // The tool is registered on the plugin context, which is unscoped: the tools
+  // registry resolves that to its global layer, inherited by every Agent.
+  ctx.inject(['tools'], (scoped: Context) => {
+    if (disposed) return
+    const disposeTool = registerDeliverTool(ctx, filesStore)
+    if (disposeTool === undefined) return
+    deliveryToolAvailable = true
+    scoped.effect(() => () => {
+      deliveryToolAvailable = false
+      disposeTool()
+    }, 'dsh-node: deliver_file')
+  })
+
+  ctx.effect(() => {
+    const timer = setInterval(() => {
+      void filesStore.cleanup().catch(() => undefined)
+    }, 10 * 60 * 1000)
+    timer.unref?.()
+    return async () => {
+      clearInterval(timer)
+      disposeFilesService()
+      await filesStore.close()
+    }
+  }, 'dsh-node: session files')
+
+  /*
     Usage state is plugin-scoped, not host-scoped.
 
     A configuration save rebuilds `DshNodeHost` (the transport host), and the
@@ -1679,6 +1739,7 @@ function installAdminSurface(
       ...ADMIN_DESCRIPTORS,
       ...QUESTIONS_DESCRIPTORS,
       ...(usage === undefined ? [] : USAGE_DESCRIPTORS),
+      ...FILES_DESCRIPTORS,
     ],
   })
 
@@ -1749,6 +1810,36 @@ function sessionWorkingDirectories(ctx: NodeHostContext): string[] {
       .filter((cwd): cwd is string => typeof cwd === 'string' && cwd !== '')
   } catch {
     return []
+  }
+}
+
+/**
+ * One live session's working directory.
+ *
+ * `ctx.sessions.get(id)` is the public lookup; a session that is not live has no
+ * directory this node may deliver from, which is exactly the refusal the store
+ * needs. Read structurally so a profile without `sessions` simply has none.
+ * @param ctx - host context.
+ * @param sessionId - the session named by a delivery tool call.
+ * @returns the absolute cwd, or `undefined`.
+ */
+function sessionCwdOf(ctx: NodeHostContext, sessionId: string): string | undefined {
+  interface SessionsLike {
+    get?(id: string): { readonly header?: { readonly cwd?: unknown } } | undefined
+  }
+  let sessions: SessionsLike | undefined
+  try {
+    sessions = (ctx as unknown as { get(key: string, strict?: boolean): unknown }).get('sessions', false) as
+      | SessionsLike
+      | undefined
+  } catch {
+    return undefined
+  }
+  try {
+    const cwd = sessions?.get?.(sessionId)?.header?.cwd
+    return typeof cwd === 'string' && cwd !== '' ? cwd : undefined
+  } catch {
+    return undefined
   }
 }
 
