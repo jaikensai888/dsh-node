@@ -121,6 +121,10 @@ Coordinator                      dsh-node（DSH Host 插件）            本机
 
 节点协议里的 `mode: full-access` 依旧只表示没有额外 Remote 白名单；会话的完全权限是独立预设 `danger-full-access` 与 `approval: never` 的组合。never 对额外审批保持拒绝含义，切换预设不会自动结算原请求；master 必须在用户确认后显式允许当前列出的审批。
 
+### 原生审批转发
+
+`nodeApprovals/pending` 和 `nodeApprovals/decide` 通过宿主原生 `$events` 查看、答复当前会话仍在等待的工具审批。支持一次性允许或拒绝，决定交给宿主结算。已在原版 Desktop `0.2.1-rc.2` 的宿主组件上验证，配套更新 dsh-master 即可使用。
+
 ### 项目结构
 
 ```

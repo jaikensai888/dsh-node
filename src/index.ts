@@ -1,3 +1,4 @@
+import { APPROVAL_DESCRIPTORS, NodeApprovalBridge } from './approval-bridge.js'
 /**
  * `dsh-node` — the outbound WebSocket adapter for this machine's Typert Gateway.
  *
@@ -1736,6 +1737,8 @@ function installAdminSurface(
   const disposeService = ctx.provide(ADMIN_SERVICE_KEY, owner)
   const disposeQuestionsService = ctx.provide(QUESTIONS_SERVICE_KEY, questions)
   const disposeAccessService = ctx.provide('nodeSessionAccess', access)
+  const approvals = new NodeApprovalBridge(ctx as unknown as ConstructorParameters<typeof NodeApprovalBridge>[0])
+  const disposeApprovalService = ctx.provide('nodeApprovals', approvals)
   // The usage owner lives under its own key so the Gateway resolves `nodeUsage/*`
   // against the queue instead of the admin surface.
   const disposeUsageService = usage === undefined ? undefined : ctx.provide(USAGE_SERVICE_KEY, usage)
@@ -1748,6 +1751,7 @@ function installAdminSurface(
       ...ADMIN_DESCRIPTORS,
       ...QUESTIONS_DESCRIPTORS,
       ...ACCESS_DESCRIPTORS,
+      ...APPROVAL_DESCRIPTORS,
       ...(usage === undefined ? [] : USAGE_DESCRIPTORS),
       ...FILES_DESCRIPTORS,
     ],
@@ -1757,6 +1761,8 @@ function installAdminSurface(
     disposeService()
     disposeQuestionsService()
     disposeAccessService()
+    disposeApprovalService()
+    await approvals.dispose()
     disposeUsageService?.()
     // `undefined` when this DSH exposes no Host registration entry point, in which
     // case there is nothing to withdraw.
