@@ -113,6 +113,14 @@ Coordinator                      dsh-node（DSH Host 插件）            本机
   本插件**不新增一层白名单**（`mode: full-access` 的含义就是这个）；
 - 节点能提供什么，等于**本机 profile 已经注册了什么**（`ready.capabilities` 会如实列出）。
 
+### 远程会话权限与审批
+
+`nodeSessionAccess/get` 读取当前会话预设、有效值修订和活跃审批。其可选 `interactive` 参数默认 false；只有允许远程执行的 master 才续期 15 秒查看租约，避免只读窗口接管本机审批。`set` 用预期修订切换当前会话的宿主预设，`decide` 用宿主生成的原审批 id 提交一次性允许或拒绝；两种写操作都支持有界 operationId 幂等记录。
+
+这些接口需要远程宿主提供 `permissionPresets.setForAgent` 和 `approval.pending/decidePending`。缺少宿主能力时返回明确的 unsupported 错误；升级节点本身不能给旧宿主补上审批生命周期。审批由宿主统一结算，本机与远程抢答只产生一次终态；租约过期交给本机回答链，重连不自动批准，重启不复活历史审批。
+
+节点协议里的 `mode: full-access` 依旧只表示没有额外 Remote 白名单；会话的完全权限是独立预设 `danger-full-access` 与 `approval: never` 的组合。never 对额外审批保持拒绝含义，切换预设不会自动结算原请求；master 必须在用户确认后显式允许当前列出的审批。
+
 ### 项目结构
 
 ```

@@ -16,6 +16,7 @@
  * @module dsh-node
  */
 
+import { NodeSessionAccess, ACCESS_DESCRIPTORS, type AccessContext } from './session-access.js'
 import type { Context } from '@deepseek-ai/cordis'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { join } from 'node:path'
@@ -1386,6 +1387,12 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
   let started: Promise<void> = Promise.resolve()
   let disposed = false
   const questions = new NodeQuestionBridge()
+  const access = new NodeSessionAccess(ctx as unknown as AccessContext)
+  ctx.effect(() => {
+    const events = ctx as unknown as { on(name: string, listener: (request: Parameters<NodeSessionAccess['answer']>[0], next: () => Promise<string>) => Promise<string>, options: { global: true; prepend: true }): () => boolean }
+    const dispose = events.on('approval/request', (request, next) => access.answer(request, next), { global: true, prepend: true })
+    return () => { dispose(); access.dispose() }
+  }, 'dsh-node:session-access')
 
   /*
     Session files are plugin-scoped, not host-scoped.
@@ -1542,7 +1549,7 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
     ensureUsage(host.nodeId, host.config)
     // Mounted before the connector starts, so the very first `ready` frame already
     // advertises the node's built-in management and usage endpoints.
-    const disposeAdmin = installAdminSurface(ctx, host, questions, usageOwner)
+    const disposeAdmin = installAdminSurface(ctx, host, questions, usageOwner, access)
     const disposeService = ctx.provide('dshNode', host)
     current = host
     adminDisposer = disposeAdmin
@@ -1704,6 +1711,7 @@ function installAdminSurface(
   host: DshNodeHost,
   questions: NodeQuestionBridge,
   usage: NodeUsageOwner | undefined,
+  access: NodeSessionAccess,
 ): () => Promise<void> {
   const config = host.config
   const owner = new NodeAdminOwner({
@@ -1727,6 +1735,7 @@ function installAdminSurface(
 
   const disposeService = ctx.provide(ADMIN_SERVICE_KEY, owner)
   const disposeQuestionsService = ctx.provide(QUESTIONS_SERVICE_KEY, questions)
+  const disposeAccessService = ctx.provide('nodeSessionAccess', access)
   // The usage owner lives under its own key so the Gateway resolves `nodeUsage/*`
   // against the queue instead of the admin surface.
   const disposeUsageService = usage === undefined ? undefined : ctx.provide(USAGE_SERVICE_KEY, usage)
@@ -1738,6 +1747,7 @@ function installAdminSurface(
     invocations: [
       ...ADMIN_DESCRIPTORS,
       ...QUESTIONS_DESCRIPTORS,
+      ...ACCESS_DESCRIPTORS,
       ...(usage === undefined ? [] : USAGE_DESCRIPTORS),
       ...FILES_DESCRIPTORS,
     ],
@@ -1746,6 +1756,7 @@ function installAdminSurface(
   return async () => {
     disposeService()
     disposeQuestionsService()
+    disposeAccessService()
     disposeUsageService?.()
     // `undefined` when this DSH exposes no Host registration entry point, in which
     // case there is nothing to withdraw.
