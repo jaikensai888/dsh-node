@@ -1,4 +1,8 @@
 import { APPROVAL_DESCRIPTORS, NodeApprovalBridge } from './approval-bridge.js'
+import {
+  registerCompletionProjection,
+  type CompletionHostContext,
+} from './completion.js'
 /**
  * `dsh-node` — the outbound WebSocket adapter for this machine's Typert Gateway.
  *
@@ -1394,6 +1398,23 @@ export function apply(ctx: NodeHostContext, config?: unknown): void {
     const dispose = events.on('approval/request', (request, next) => access.answer(request, next), { global: true, prepend: true })
     return () => { dispose(); access.dispose() }
   }, 'dsh-node:session-access')
+
+  /*
+    Publish the last successful turn as a session-projection summary.
+
+    The remote follow list needs one fact per session — the seq of the latest
+    `turn/end(completed)` — and the session controller carries every registered
+    summary projection into `session/list`. Registration is best-effort: a host
+    without the projection seam keeps working and simply reports no summary.
+  */
+  registerCompletionProjection(ctx as unknown as CompletionHostContext, {
+    onFailure: error => {
+      logger.warn('lastCompletedSeq projection unavailable', {
+        reason: error instanceof Error ? error.message : String(error),
+      })
+    },
+  })
+
 
   /*
     Session files are plugin-scoped, not host-scoped.
